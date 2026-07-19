@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
+# macOS/Linux
+.DS_Store
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints
+saved_models/
+*.pth
+*.pt
+*.ckpt
+
+# Outputs
+outputs/
+
+# Cache
+.cache/
+
+# Dataset (ignore if too large)
+dataset/
+
+# Temporary
+*.tmp
