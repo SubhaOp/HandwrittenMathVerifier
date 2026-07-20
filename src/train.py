@@ -1,26 +1,20 @@
-import os
 import torch
 import torch.nn as nn
+from pathlib import Path
 
 from tqdm import tqdm
-
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
+from src.config import *
 from src.dataset import HMEDataset
 from src.model import MathRecognizer
 
 
-# -------------------------------------------------
-# Device
-# -------------------------------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-
-# -------------------------------------------------
+# ======================================================
 # Collate Function
-# -------------------------------------------------
+# ======================================================
+
 def collate_fn(batch):
 
     images = []
@@ -41,78 +35,83 @@ def collate_fn(batch):
     return images, labels
 
 
-# -------------------------------------------------
+# ======================================================
 # Dataset
-# -------------------------------------------------
+# ======================================================
+
+print("\nLoading Dataset...")
+
 dataset = HMEDataset()
 
 loader = DataLoader(
     dataset,
-    batch_size=32,
+    batch_size=BATCH_SIZE,
     shuffle=True,
-    collate_fn=collate_fn,
-    num_workers=4,
-    pin_memory=torch.cuda.is_available()
+    num_workers=NUM_WORKERS,
+    pin_memory=torch.cuda.is_available(),
+    collate_fn=collate_fn
 )
 
+print(f"Training Samples : {len(dataset)}")
 
-# -------------------------------------------------
+
+# ======================================================
 # Model
-# -------------------------------------------------
+# ======================================================
+
 num_classes = len(dataset.char2idx) + 1
 
-model = MathRecognizer(num_classes).to(device)
+model = MathRecognizer(num_classes).to(DEVICE)
+
+print(model)
 
 
-# -------------------------------------------------
+# ======================================================
 # Loss
-# -------------------------------------------------
+# ======================================================
+
 criterion = nn.CTCLoss(
     blank=0,
     zero_infinity=True
 )
 
 
-# -------------------------------------------------
+# ======================================================
 # Optimizer
-# -------------------------------------------------
+# ======================================================
+
 optimizer = torch.optim.Adam(
     model.parameters(),
-    lr=1e-4
+    lr=LEARNING_RATE
 )
 
 
-# -------------------------------------------------
-# Checkpoint Folder
-# -------------------------------------------------
-checkpoint_dir = "saved_models"
-os.makedirs(checkpoint_dir, exist_ok=True)
+# ======================================================
+# Checkpoint Paths
+# ======================================================
 
-checkpoint_path = os.path.join(
-    checkpoint_dir,
-    "checkpoint.pth"
-)
+checkpoint_path = MODEL_DIR / "checkpoint.pth"
 
-best_model_path = os.path.join(
-    checkpoint_dir,
-    "best_model.pth"
-)
+best_model_path = MODEL_DIR / "best_model.pth"
+
+final_model_path = MODEL_DIR / "math_recognizer.pth"
 
 
-# -------------------------------------------------
+# ======================================================
 # Resume Training
-# -------------------------------------------------
+# ======================================================
+
 start_epoch = 0
-num_epochs = 20
+
 best_loss = float("inf")
 
-if os.path.exists(checkpoint_path):
+if checkpoint_path.exists():
 
-    print("\nLoading previous checkpoint...")
+    print("\nLoading Checkpoint...")
 
     checkpoint = torch.load(
         checkpoint_path,
-        map_location=device
+        map_location=DEVICE
     )
 
     model.load_state_dict(
@@ -124,29 +123,38 @@ if os.path.exists(checkpoint_path):
     )
 
     start_epoch = checkpoint["epoch"] + 1
+
     best_loss = checkpoint["loss"]
 
-    print(f"Resuming from epoch {start_epoch}")
+    print(f"Resuming from Epoch {start_epoch}")
+
+else:
+
+    print("\nStarting Fresh Training...")
 
 
-# -------------------------------------------------
+# ======================================================
 # Training
-# -------------------------------------------------
+# ======================================================
+
 model.train()
 
-for epoch in range(start_epoch, num_epochs):
+print("\nTraining Started...\n")
+
+for epoch in range(start_epoch, EPOCHS):
 
     total_loss = 0.0
 
-    progress = tqdm(
+    progress_bar = tqdm(
         loader,
-        desc=f"Epoch {epoch+1}/{num_epochs}"
+        desc=f"Epoch {epoch+1}/{EPOCHS}"
     )
 
-    for images, labels in progress:
+    for images, labels in progress_bar:
 
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(DEVICE)
+
+        labels = labels.to(DEVICE)
 
         outputs = model(images)
 
@@ -158,7 +166,7 @@ for epoch in range(start_epoch, num_epochs):
             (images.size(0),),
             outputs.size(0),
             dtype=torch.long,
-            device=device
+            device=DEVICE
         )
 
         target_lengths = (labels != 0).sum(dim=1)
@@ -178,18 +186,21 @@ for epoch in range(start_epoch, num_epochs):
 
         total_loss += loss.item()
 
-        progress.set_postfix(
+        progress_bar.set_postfix(
             loss=f"{loss.item():.4f}"
         )
 
     avg_loss = total_loss / len(loader)
 
-    print(f"\nEpoch {epoch+1}/{num_epochs}")
+    print("\n----------------------------------------")
+    print(f"Epoch {epoch+1}/{EPOCHS}")
     print(f"Average Loss : {avg_loss:.4f}")
+    print("----------------------------------------")
 
-    # ---------------------------------------------
-    # Save checkpoint every epoch
-    # ---------------------------------------------
+    # ==========================================
+    # Save Resume Checkpoint
+    # ==========================================
+
     torch.save(
         {
             "epoch": epoch,
@@ -200,11 +211,12 @@ for epoch in range(start_epoch, num_epochs):
         checkpoint_path
     )
 
-    print("Checkpoint saved.")
+    print("Checkpoint Saved")
 
-    # ---------------------------------------------
-    # Save best model
-    # ---------------------------------------------
+    # ==========================================
+    # Save Best Model
+    # ==========================================
+
     if avg_loss < best_loss:
 
         best_loss = avg_loss
@@ -214,22 +226,22 @@ for epoch in range(start_epoch, num_epochs):
             best_model_path
         )
 
-        print("Best model updated!")
+        print("Best Model Updated")
 
 
-
-# -------------------------------------------------
+# ======================================================
 # Save Final Model
-# -------------------------------------------------
+# ======================================================
+
 torch.save(
     model.state_dict(),
-    os.path.join(
-        checkpoint_dir,
-        "math_recognizer.pth"
-    )
+    final_model_path
 )
 
-print("\nTraining Finished Successfully!")
-print("Final model saved.")
-print("Best model saved.")
-print("Checkpoint saved.")
+print("\n========================================")
+print("Training Completed Successfully")
+print("========================================")
+
+print(f"Checkpoint : {checkpoint_path}")
+print(f"Best Model : {best_model_path}")
+print(f"Final Model: {final_model_path}")
