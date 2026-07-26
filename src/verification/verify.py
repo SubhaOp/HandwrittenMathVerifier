@@ -1,1 +1,0 @@
-# Verification module placeholder
