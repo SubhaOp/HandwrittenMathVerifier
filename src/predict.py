@@ -28,15 +28,21 @@ num_classes = len(char2idx) + 1
 
 model = MathRecognizer(num_classes)
 
-model.load_state_dict(
-    torch.load(
-        MODEL_DIR / "best_model.pth",
-        map_location=DEVICE
-    )
+checkpoint = torch.load(
+    MODEL_DIR / "best_model.pth",
+    map_location=DEVICE
 )
+
+# Supports both state_dict-only and checkpoint formats
+if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+    model.load_state_dict(checkpoint["model_state_dict"])
+else:
+    model.load_state_dict(checkpoint)
 
 model.to(DEVICE)
 model.eval()
+
+print("✅ Model Loaded Successfully")
 
 
 # ======================================================
