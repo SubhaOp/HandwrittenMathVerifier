@@ -23,7 +23,7 @@ class HMEDataset(Dataset):
             names=["image", "label"]
         )
 
-        with open(CHAR2IDX_FILE, "r") as f:
+        with open(CHAR2IDX_FILE, "r", encoding="utf-8") as f:
             self.char2idx = json.load(f)
 
     def __len__(self):
@@ -31,10 +31,18 @@ class HMEDataset(Dataset):
 
     def encode_label(self, text):
 
-        return torch.tensor(
-            [self.char2idx[c] for c in text],
-            dtype=torch.long
-        )
+        encoded = []
+
+        for ch in text:
+
+            if ch not in self.char2idx:
+                raise ValueError(
+                    f"Character '{ch}' not found in vocabulary."
+                )
+
+            encoded.append(self.char2idx[ch])
+
+        return torch.tensor(encoded, dtype=torch.long)
 
     def __getitem__(self, idx):
 
@@ -43,8 +51,12 @@ class HMEDataset(Dataset):
         image_path = self.image_dir / row["image"]
 
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+
         if image is None:
-            raise FileNotFoundError(f"Cannot read image: {image_path}")
+            raise FileNotFoundError(
+                f"Cannot read image: {image_path}"
+            )
+
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         image = cv2.resize(
@@ -56,11 +68,9 @@ class HMEDataset(Dataset):
 
         image = torch.tensor(image, dtype=torch.float32)
 
-        # Convert HWC -> CHW
+        # HWC -> CHW
         image = image.permute(2, 0, 1)
 
         label = self.encode_label(row["label"])
 
-        
         return image, label
-        
