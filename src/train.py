@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from pathlib import Path
 
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -80,9 +79,10 @@ criterion = nn.CTCLoss(
 # Optimizer
 # ======================================================
 
-optimizer = torch.optim.Adam(
+optimizer = torch.optim.AdamW(
     model.parameters(),
-    lr=LEARNING_RATE
+    lr=LEARNING_RATE,
+    weight_decay=1e-4
 )
 
 
@@ -91,9 +91,7 @@ optimizer = torch.optim.Adam(
 # ======================================================
 
 checkpoint_path = MODEL_DIR / "checkpoint.pth"
-
 best_model_path = MODEL_DIR / "best_model.pth"
-
 final_model_path = MODEL_DIR / "math_recognizer.pth"
 
 
@@ -102,7 +100,6 @@ final_model_path = MODEL_DIR / "math_recognizer.pth"
 # ======================================================
 
 start_epoch = 0
-
 best_loss = float("inf")
 
 if checkpoint_path.exists():
@@ -123,7 +120,6 @@ if checkpoint_path.exists():
     )
 
     start_epoch = checkpoint["epoch"] + 1
-
     best_loss = checkpoint["loss"]
 
     print(f"Resuming from Epoch {start_epoch}")
@@ -137,39 +133,44 @@ else:
 # Training
 # ======================================================
 
-model.train()
-
 print("\nTraining Started...\n")
 
 for epoch in range(start_epoch, EPOCHS):
+
+    model.train()
 
     total_loss = 0.0
 
     progress_bar = tqdm(
         loader,
-        desc=f"Epoch {epoch+1}/{EPOCHS}"
+        desc=f"Epoch {epoch + 1}/{EPOCHS}"
     )
 
     for images, labels in progress_bar:
 
         images = images.to(DEVICE)
-
         labels = labels.to(DEVICE)
+
+        optimizer.zero_grad()
 
         outputs = model(images)
 
-        outputs = outputs.log_softmax(2)
+        outputs = outputs.log_softmax(dim=2)
 
         outputs = outputs.permute(1, 0, 2)
 
         input_lengths = torch.full(
-            (images.size(0),),
-            outputs.size(0),
+            size=(images.size(0),),
+            fill_value=outputs.size(0),
             dtype=torch.long,
             device=DEVICE
         )
 
-        target_lengths = (labels != 0).sum(dim=1)
+        target_lengths = torch.tensor(
+            [torch.count_nonzero(label).item() for label in labels],
+            dtype=torch.long,
+            device=DEVICE
+        )
 
         loss = criterion(
             outputs,
@@ -178,9 +179,12 @@ for epoch in range(start_epoch, EPOCHS):
             target_lengths
         )
 
-        optimizer.zero_grad()
-
         loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=5.0
+        )
 
         optimizer.step()
 
@@ -193,12 +197,12 @@ for epoch in range(start_epoch, EPOCHS):
     avg_loss = total_loss / len(loader)
 
     print("\n----------------------------------------")
-    print(f"Epoch {epoch+1}/{EPOCHS}")
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
     print(f"Average Loss : {avg_loss:.4f}")
     print("----------------------------------------")
 
     # ==========================================
-    # Save Resume Checkpoint
+    # Save Checkpoint
     # ==========================================
 
     torch.save(
