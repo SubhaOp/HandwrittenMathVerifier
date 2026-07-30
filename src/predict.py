@@ -1,22 +1,18 @@
-# Prediction entrypoint placeholder
 import json
 import cv2
 import torch
 
-from pathlib import Path
-
 from src.config import *
 from src.model import MathRecognizer
-
 
 # ======================================================
 # Load Vocabulary
 # ======================================================
 
-with open(CHAR2IDX_FILE, "r") as f:
+with open(CHAR2IDX_FILE, "r", encoding="utf-8") as f:
     char2idx = json.load(f)
 
-with open(IDX2CHAR_FILE, "r") as f:
+with open(IDX2CHAR_FILE, "r", encoding="utf-8") as f:
     idx2char = json.load(f)
 
 num_classes = len(char2idx) + 1
@@ -33,7 +29,6 @@ checkpoint = torch.load(
     map_location=DEVICE
 )
 
-# Supports both state_dict-only and checkpoint formats
 if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
     model.load_state_dict(checkpoint["model_state_dict"])
 else:
@@ -51,7 +46,7 @@ print("✅ Model Loaded Successfully")
 
 def preprocess(image_path):
 
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = cv2.imread(str(image_path))
 
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
@@ -78,33 +73,40 @@ def preprocess(image_path):
 
 
 # ======================================================
-# Greedy CTC Decoder
+# CTC Greedy Decoder
 # ======================================================
 
 def decode(indices):
 
     prediction = []
 
-    previous = -1
+    previous = None
 
     for idx in indices:
 
         idx = int(idx)
 
+        # Ignore blank token
         if idx == 0:
-            previous = idx
+            previous = None
             continue
 
+        # Collapse repeated characters
         if idx == previous:
             continue
 
-        prediction.append(
-            idx2char[str(idx)]
-        )
+        char = idx2char.get(str(idx), "")
+
+        prediction.append(char)
 
         previous = idx
 
-    return "".join(prediction)
+    text = "".join(prediction)
+
+    # remove leading/trailing whitespace only
+    text = text.strip()
+
+    return text
 
 
 # ======================================================
@@ -119,12 +121,7 @@ def predict(image_path):
 
         output = model(image)
 
-        output = torch.softmax(
-            output,
-            dim=2
-        )
-
-        prediction = output.argmax(2)
+        prediction = output.argmax(dim=2)
 
         prediction = prediction.squeeze(0)
 
@@ -137,9 +134,9 @@ def predict(image_path):
 
 if __name__ == "__main__":
 
-    image_path = input("Image Path : ").strip()
+    image_path = input("Image Path: ").strip()
 
     prediction = predict(image_path)
 
-    print("\nPrediction:")
+    print("\nPredicted Expression:")
     print(prediction)
