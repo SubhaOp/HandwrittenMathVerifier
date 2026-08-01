@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.nn.utils.rnn import pad_sequence
 
 from src.config import *
@@ -42,8 +42,70 @@ print("\nLoading Dataset...")
 
 dataset = HMEDataset()
 
-loader = DataLoader(
+# Number of time steps produced by the current model.
+# Your model test confirmed this is 192.
+CTC_TIME_STEPS = 192
+
+
+# ======================================================
+# Find CTC-valid samples
+# ======================================================
+
+print("\nChecking CTC validity...")
+
+valid_indices = []
+invalid_indices = []
+
+for idx in tqdm(range(len(dataset)), desc="Checking labels"):
+
+    # We only need the label here.
+    # Avoid loading/processing the image during this scan.
+    row = dataset.df.iloc[idx]
+
+    label = dataset.encode_label(row["label"])
+
+    target_length = len(label)
+
+    # CTC needs an extra time step whenever two
+    # consecutive target tokens are identical.
+    if target_length > 1:
+        repeats = int((label[1:] == label[:-1]).sum().item())
+    else:
+        repeats = 0
+
+    required_steps = target_length + repeats
+
+    if required_steps <= CTC_TIME_STEPS:
+        valid_indices.append(idx)
+    else:
+        invalid_indices.append(idx)
+
+
+print("\n========================================")
+print("CTC Dataset Filtering")
+print("========================================")
+print(f"Original Samples : {len(dataset)}")
+print(f"Valid Samples    : {len(valid_indices)}")
+print(f"Filtered Samples : {len(invalid_indices)}")
+print("========================================")
+
+
+# ======================================================
+# Create filtered dataset
+# ======================================================
+
+train_dataset = Subset(
     dataset,
+    valid_indices
+)
+
+
+# ======================================================
+# DataLoader
+# ======================================================
+
+loader = DataLoader(
+    train_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=NUM_WORKERS,
@@ -51,7 +113,7 @@ loader = DataLoader(
     collate_fn=collate_fn
 )
 
-print(f"Training Samples : {len(dataset)}")
+print(f"Training Samples : {len(train_dataset)}")
 
 
 # ======================================================
