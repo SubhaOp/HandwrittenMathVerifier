@@ -9,24 +9,56 @@ class MathRecognizer(nn.Module):
         super().__init__()
 
         # ==========================================
-        # CNN Backbone
+        # ResNet18 Backbone
         # ==========================================
 
         backbone = models.resnet18(
             weights=models.ResNet18_Weights.DEFAULT
         )
 
-        # Remove Average Pool and FC layers
+        # --------------------------------------------------
+        # IMPORTANT:
+        # Standard ResNet18 reduces both H and W by 32x.
+        #
+        # Input:
+        # (B, 3, 128, 1536)
+        #
+        # Standard output:
+        # (B, 512, 4, 48)
+        #
+        # For CTC, 48 time steps are too few.
+        #
+        # We therefore prevent horizontal downsampling
+        # in layer3 and layer4 while still reducing height.
+        # --------------------------------------------------
+
+        # layer3 first block
+        backbone.layer3[0].conv1.stride = (2, 1)
+        backbone.layer3[0].downsample[0].stride = (2, 1)
+
+        # layer4 first block
+        backbone.layer4[0].conv1.stride = (2, 1)
+        backbone.layer4[0].downsample[0].stride = (2, 1)
+
+        # Remove global average pooling and FC
         self.cnn = nn.Sequential(
             *list(backbone.children())[:-2]
         )
+
+        # ==========================================
+        # Height Pooling
+        # ==========================================
+
+        # Collapse only the height dimension.
+        # Width is preserved as the CTC sequence.
+        self.height_pool = nn.AdaptiveAvgPool2d((1, None))
 
         # ==========================================
         # BiLSTM
         # ==========================================
 
         self.lstm = nn.LSTM(
-            input_size=512 * 4,
+            input_size=512,
             hidden_size=256,
             num_layers=2,
             batch_first=True,
@@ -40,6 +72,8 @@ class MathRecognizer(nn.Module):
 
         self.dropout = nn.Dropout(0.3)
 
+        # Bidirectional:
+        # 256 forward + 256 backward = 512
         self.fc = nn.Linear(
             512,
             num_classes
@@ -47,30 +81,54 @@ class MathRecognizer(nn.Module):
 
     def forward(self, x):
 
+        # ==========================================
         # CNN Feature Extraction
+        # ==========================================
+
         x = self.cnn(x)
 
-        # Shape:
-        # (B, 512, 4, W)
+        # Expected:
+        # (B, 512, 4, 192)
+        # for input (B, 3, 128, 1536)
 
-        b, c, h, w = x.size()
+        # ==========================================
+        # Collapse Height
+        # ==========================================
 
-        # Convert width dimension into sequence
-        x = x.permute(0, 3, 1, 2)
+        x = self.height_pool(x)
 
-        # (B, W, 512*4)
-        x = x.reshape(b, w, c * h)
+        # (B, 512, 1, 192)
 
-        # Better CUDA performance
+        x = x.squeeze(2)
+
+        # (B, 512, 192)
+
+        # ==========================================
+        # Convert width to sequence
+        # ==========================================
+
+        x = x.permute(0, 2, 1)
+
+        # (B, 192, 512)
+
+        # ==========================================
+        # BiLSTM
+        # ==========================================
+
         self.lstm.flatten_parameters()
 
-        # BiLSTM
         x, _ = self.lstm(x)
 
-        # Dropout
+        # (B, 192, 512)
+
+        # ==========================================
+        # Classification
+        # ==========================================
+
         x = self.dropout(x)
 
-        # Character classification
         x = self.fc(x)
+
+        # (B, 192, num_classes)
 
         return x
