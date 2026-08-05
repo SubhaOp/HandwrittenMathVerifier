@@ -117,7 +117,7 @@ def predict(image_path):
 
     image = preprocess(image_path)
 
-    with torch.no_grad():
+    with torch.inference_mode():
 
         output = model(image)
 
