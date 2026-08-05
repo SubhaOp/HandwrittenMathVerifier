@@ -1,8 +1,11 @@
 """
-Full Model Evaluation Script
+Greedy vs Beam Search Evaluation
 
-Evaluates the trained handwritten mathematical expression
-recognition model on the complete test dataset.
+Compares:
+1. CTC Greedy decoding
+2. CTC Prefix Beam Search
+
+on the same subset of the HME100K test dataset.
 """
 
 import time
@@ -17,6 +20,21 @@ from src.config import (
 )
 
 
+# ======================================================
+# Experiment Configuration
+# ======================================================
+
+# Start small because beam search is much slower.
+# After confirming it works, increase this.
+MAX_SAMPLES = 1000
+
+BEAM_WIDTH = 10
+
+
+# ======================================================
+# Load Test Labels
+# ======================================================
+
 def load_test_labels():
 
     df = pd.read_csv(
@@ -29,96 +47,316 @@ def load_test_labels():
     return df
 
 
+# ======================================================
+# Evaluation
+# ======================================================
+
 def evaluate():
 
     print("\nLoading Test Dataset...")
 
     df = load_test_labels()
 
+    # --------------------------------------------------
+    # Use same subset for both decoders
+    # --------------------------------------------------
+
+    if MAX_SAMPLES is not None:
+        df = df.iloc[:MAX_SAMPLES].copy()
+
     total = len(df)
 
-    print(f"Total Test Images : {total}\n")
+    print(f"Evaluation Samples : {total}")
+    print(f"Beam Width         : {BEAM_WIDTH}")
 
-    correct = 0
-    errors = 0
-    total_inference_time = 0.0
+    greedy_correct = 0
+    beam_correct = 0
+
+    greedy_errors = 0
+    beam_errors = 0
+
+    greedy_total_time = 0.0
+    beam_total_time = 0.0
 
     results = []
+
+    # ==================================================
+    # Evaluate
+    # ==================================================
 
     for _, row in tqdm(
         df.iterrows(),
         total=total,
-        desc="Evaluating"
+        desc="Comparing Decoders"
     ):
 
         image_path = TEST_IMAGE_DIR / row["image"]
-        ground_truth = str(row["label"]).strip()
+
+        ground_truth = str(
+            row["label"]
+        ).strip()
+
+        # ==============================================
+        # Greedy Prediction
+        # ==============================================
 
         start = time.perf_counter()
 
         try:
-            prediction = predict(image_path).strip()
-            error_message = ""
+
+            greedy_prediction = predict(
+                image_path,
+                decoder="greedy"
+            ).strip()
+
+            greedy_error = ""
 
         except Exception as e:
-            prediction = ""
-            error_message = str(e)
-            errors += 1
 
-        elapsed = time.perf_counter() - start
-        total_inference_time += elapsed
+            greedy_prediction = ""
+            greedy_error = str(e)
 
-        is_correct = prediction == ground_truth
+            greedy_errors += 1
 
-        if is_correct:
-            correct += 1
+        greedy_time = (
+            time.perf_counter() - start
+        )
+
+        greedy_total_time += greedy_time
+
+        greedy_is_correct = (
+            greedy_prediction == ground_truth
+        )
+
+        if greedy_is_correct:
+            greedy_correct += 1
+
+
+        # ==============================================
+        # Beam Search Prediction
+        # ==============================================
+
+        start = time.perf_counter()
+
+        try:
+
+            beam_prediction = predict(
+                image_path,
+                decoder="beam",
+                beam_width=BEAM_WIDTH
+            ).strip()
+
+            beam_error = ""
+
+        except Exception as e:
+
+            beam_prediction = ""
+            beam_error = str(e)
+
+            beam_errors += 1
+
+        beam_time = (
+            time.perf_counter() - start
+        )
+
+        beam_total_time += beam_time
+
+        beam_is_correct = (
+            beam_prediction == ground_truth
+        )
+
+        if beam_is_correct:
+            beam_correct += 1
+
+
+        # ==============================================
+        # Save Result
+        # ==============================================
 
         results.append({
-            "image": row["image"],
-            "ground_truth": ground_truth,
-            "prediction": prediction,
-            "correct": is_correct,
-            "inference_time": elapsed,
-            "error": error_message
+
+            "image":
+                row["image"],
+
+            "ground_truth":
+                ground_truth,
+
+            "greedy_prediction":
+                greedy_prediction,
+
+            "beam_prediction":
+                beam_prediction,
+
+            "greedy_correct":
+                greedy_is_correct,
+
+            "beam_correct":
+                beam_is_correct,
+
+            "greedy_time":
+                greedy_time,
+
+            "beam_time":
+                beam_time,
+
+            "greedy_error":
+                greedy_error,
+
+            "beam_error":
+                beam_error
         })
 
-    # -------------------------------------------------
-    # Calculate metrics
-    # -------------------------------------------------
 
-    accuracy = (correct / total) * 100 if total else 0
+    # ==================================================
+    # Metrics
+    # ==================================================
 
-    avg_inference_time = (
-        total_inference_time / total
+    greedy_accuracy = (
+        greedy_correct / total * 100
         if total else 0
     )
 
-    # -------------------------------------------------
-    # Print results
-    # -------------------------------------------------
+    beam_accuracy = (
+        beam_correct / total * 100
+        if total else 0
+    )
+
+    greedy_avg_time = (
+        greedy_total_time / total
+        if total else 0
+    )
+
+    beam_avg_time = (
+        beam_total_time / total
+        if total else 0
+    )
+
+    improvement = (
+        beam_accuracy - greedy_accuracy
+    )
+
+
+    # ==================================================
+    # Final Results
+    # ==================================================
 
     print("\n")
     print("=" * 70)
-    print("FINAL EVALUATION RESULTS")
+    print("GREEDY VS BEAM SEARCH RESULTS")
     print("=" * 70)
 
-    print(f"Total Test Images       : {total}")
-    print(f"Correct Predictions     : {correct}")
-    print(f"Incorrect Predictions   : {total - correct}")
-    print(f"Prediction Errors       : {errors}")
-    print(f"Exact Match Accuracy    : {accuracy:.2f}%")
-    print(f"Total Inference Time    : {total_inference_time:.2f} sec")
-    print(f"Average Inference Time  : {avg_inference_time:.4f} sec/image")
+    print(f"Total Images           : {total}")
+
+    print("\n--- GREEDY CTC ---")
+
+    print(
+        f"Correct Predictions    : "
+        f"{greedy_correct}"
+    )
+
+    print(
+        f"Incorrect Predictions  : "
+        f"{total - greedy_correct}"
+    )
+
+    print(
+        f"Prediction Errors      : "
+        f"{greedy_errors}"
+    )
+
+    print(
+        f"Exact Match Accuracy   : "
+        f"{greedy_accuracy:.2f}%"
+    )
+
+    print(
+        f"Average Inference Time : "
+        f"{greedy_avg_time:.4f} sec/image"
+    )
+
+
+    print("\n--- CTC BEAM SEARCH ---")
+
+    print(
+        f"Correct Predictions    : "
+        f"{beam_correct}"
+    )
+
+    print(
+        f"Incorrect Predictions  : "
+        f"{total - beam_correct}"
+    )
+
+    print(
+        f"Prediction Errors      : "
+        f"{beam_errors}"
+    )
+
+    print(
+        f"Exact Match Accuracy   : "
+        f"{beam_accuracy:.2f}%"
+    )
+
+    print(
+        f"Average Inference Time : "
+        f"{beam_avg_time:.4f} sec/image"
+    )
+
+
+    print("\n--- COMPARISON ---")
+
+    print(
+        f"Greedy Accuracy        : "
+        f"{greedy_accuracy:.2f}%"
+    )
+
+    print(
+        f"Beam Accuracy          : "
+        f"{beam_accuracy:.2f}%"
+    )
+
+    print(
+        f"Difference             : "
+        f"{improvement:+.2f}%"
+    )
+
+    if beam_accuracy > greedy_accuracy:
+
+        print(
+            "Result                 : "
+            "✅ Beam Search Improved Accuracy"
+        )
+
+    elif beam_accuracy == greedy_accuracy:
+
+        print(
+            "Result                 : "
+            "⚠️ No Accuracy Improvement"
+        )
+
+    else:
+
+        print(
+            "Result                 : "
+            "❌ Beam Search Reduced Accuracy"
+        )
 
     print("=" * 70)
 
-    # -------------------------------------------------
-    # Save predictions
-    # -------------------------------------------------
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # ==================================================
+    # Save CSV
+    # ==================================================
 
-    output_file = OUTPUT_DIR / "evaluation_results.csv"
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    output_file = (
+        OUTPUT_DIR /
+        "greedy_vs_beam_results.csv"
+    )
 
     results_df = pd.DataFrame(results)
 
@@ -127,9 +365,17 @@ def evaluate():
         index=False
     )
 
-    print(f"\nEvaluation results saved to:")
+    print(
+        "\nDetailed comparison saved to:"
+    )
+
     print(output_file)
 
 
+# ======================================================
+# Main
+# ======================================================
+
 if __name__ == "__main__":
+
     evaluate()
