@@ -20,21 +20,26 @@ from src.model import MathRecognizer
 
 
 # ======================================================
-# Configuration
+# V3 Configuration
 # ======================================================
 
 VALIDATION_RATIO = 0.10
 
 RANDOM_SEED = 42
 
-CTC_TIME_STEPS = 192
+# IMPORTANT:
+# V3 now produces approximately 384 CTC time steps.
+
+CTC_TIME_STEPS = 384
 
 
 # ======================================================
 # Reproducibility
 # ======================================================
 
-random.seed(RANDOM_SEED)
+random.seed(
+    RANDOM_SEED
+)
 
 torch.manual_seed(
     RANDOM_SEED
@@ -48,17 +53,41 @@ if torch.cuda.is_available():
 
 
 # ======================================================
+# Print Device
+# ======================================================
+
+print("\n========================================")
+print("V3 TRAINING")
+print("========================================")
+
+print(
+    f"Device : {DEVICE}"
+)
+
+if torch.cuda.is_available():
+
+    print(
+        f"GPU    : "
+        f"{torch.cuda.get_device_name(0)}"
+    )
+
+print("========================================\n")
+
+
+# ======================================================
 # Collate Function
 # ======================================================
 
 def collate_fn(batch):
 
     images = []
+
     labels = []
 
     for image, label in batch:
 
         images.append(image)
+
         labels.append(label)
 
     images = torch.stack(
@@ -75,20 +104,19 @@ def collate_fn(batch):
 
 
 # ======================================================
-# CTC Target Length
+# Target Lengths
 # ======================================================
 
 def get_target_lengths(labels):
 
     """
-    Vocabulary IDs start from 1.
-    CTC blank/padding ID is 0.
+    Padding / CTC blank ID = 0.
 
-    Therefore non-zero values represent
-    actual target characters.
+    Actual target characters use non-zero IDs.
     """
 
     return torch.tensor(
+
         [
             torch.count_nonzero(
                 label
@@ -96,13 +124,15 @@ def get_target_lengths(labels):
 
             for label in labels
         ],
+
         dtype=torch.long,
+
         device=labels.device
     )
 
 
 # ======================================================
-# Dataset
+# Load Dataset
 # ======================================================
 
 print("\nLoading Dataset...")
@@ -116,7 +146,7 @@ print(
 
 
 # ======================================================
-# Find CTC-valid samples
+# CTC Validity Filtering
 # ======================================================
 
 print(
@@ -124,15 +154,16 @@ print(
 )
 
 valid_indices = []
+
 invalid_indices = []
 
 
 for idx in tqdm(
+
     range(len(dataset)),
+
     desc="Checking labels"
 ):
-
-    # Do not load image during this scan.
 
     row = dataset.df.iloc[idx]
 
@@ -142,13 +173,15 @@ for idx in tqdm(
 
     target_length = len(label)
 
-    # ----------------------------------------------
-    # CTC repeated-character requirement
-    # ----------------------------------------------
+    # --------------------------------------------------
+    # Repeated adjacent labels require an extra CTC
+    # blank position.
+    # --------------------------------------------------
 
     if target_length > 1:
 
         repeats = int(
+
             (
                 label[1:]
                 ==
@@ -163,7 +196,8 @@ for idx in tqdm(
         repeats = 0
 
     required_steps = (
-        target_length +
+        target_length
+        +
         repeats
     )
 
@@ -181,7 +215,7 @@ for idx in tqdm(
 
 
 print("\n========================================")
-print("CTC Dataset Filtering")
+print("V3 CTC Dataset Filtering")
 print("========================================")
 
 print(
@@ -214,12 +248,15 @@ generator.manual_seed(
 
 
 permutation = torch.randperm(
+
     len(valid_indices),
+
     generator=generator
 ).tolist()
 
 
 validation_size = int(
+
     len(valid_indices)
     *
     VALIDATION_RATIO
@@ -241,31 +278,39 @@ train_positions = permutation[
 
 
 train_indices = [
+
     valid_indices[i]
+
     for i in train_positions
 ]
 
 
 val_indices = [
+
     valid_indices[i]
+
     for i in val_positions
 ]
 
 
 train_dataset = Subset(
+
     dataset,
+
     train_indices
 )
 
 
 val_dataset = Subset(
+
     dataset,
+
     val_indices
 )
 
 
 print("\n========================================")
-print("Dataset Split")
+print("V3 Dataset Split")
 print("========================================")
 
 print(
@@ -318,7 +363,7 @@ val_loader = DataLoader(
 
 
 # ======================================================
-# Model
+# Create Model
 # ======================================================
 
 num_classes = (
@@ -334,11 +379,78 @@ model = MathRecognizer(
 
 print("\nModel Created Successfully")
 
+print(
+    f"Number of Classes : "
+    f"{num_classes}"
+)
+
 print(model)
 
 
 # ======================================================
-# Loss
+# Verify Sequence Length
+# ======================================================
+
+print(
+    "\nChecking V3 model output shape..."
+)
+
+
+with torch.no_grad():
+
+    test_input = torch.zeros(
+
+        1,
+        CHANNELS,
+        IMAGE_HEIGHT,
+        IMAGE_WIDTH,
+
+        device=DEVICE
+    )
+
+    test_output = model(
+        test_input
+    )
+
+
+print(
+    f"Input Shape  : "
+    f"{tuple(test_input.shape)}"
+)
+
+print(
+    f"Output Shape : "
+    f"{tuple(test_output.shape)}"
+)
+
+
+if test_output.shape[1] != CTC_TIME_STEPS:
+
+    raise RuntimeError(
+
+        "V3 sequence length mismatch! "
+
+        f"Expected {CTC_TIME_STEPS}, "
+
+        f"got {test_output.shape[1]}"
+    )
+
+
+print(
+    "✓ V3 sequence length verified."
+)
+
+
+del test_input
+del test_output
+
+if torch.cuda.is_available():
+
+    torch.cuda.empty_cache()
+
+
+# ======================================================
+# CTC Loss
 # ======================================================
 
 criterion = nn.CTCLoss(
@@ -364,10 +476,11 @@ optimizer = torch.optim.AdamW(
 
 
 # ======================================================
-# Learning Rate Scheduler
+# Scheduler
 # ======================================================
 
 scheduler = (
+
     torch.optim.lr_scheduler.ReduceLROnPlateau(
 
         optimizer,
@@ -384,26 +497,33 @@ scheduler = (
 
 
 # ======================================================
-# Model Paths
+# V3 Model Paths
 #
 # IMPORTANT:
-# New names are intentional.
-# Your original baseline is NOT overwritten.
+# These are completely separate from V2.
 # ======================================================
 
 checkpoint_path = (
-    MODEL_DIR /
-    "checkpoint_v2.pth"
+
+    MODEL_DIR
+    /
+    "checkpoint_v3.pth"
 )
+
 
 best_model_path = (
-    MODEL_DIR /
-    "best_model_v2.pth"
+
+    MODEL_DIR
+    /
+    "best_model_v3.pth"
 )
 
+
 final_model_path = (
-    MODEL_DIR /
-    "math_recognizer_v2.pth"
+
+    MODEL_DIR
+    /
+    "math_recognizer_v3.pth"
 )
 
 
@@ -429,12 +549,16 @@ def train_one_epoch():
     for images, labels in progress_bar:
 
         images = images.to(
+
             DEVICE,
+
             non_blocking=True
         )
 
         labels = labels.to(
+
             DEVICE,
+
             non_blocking=True
         )
 
@@ -444,17 +568,19 @@ def train_one_epoch():
         )
 
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # Forward
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         outputs = model(
             images
         )
 
+
         outputs = outputs.log_softmax(
             dim=2
         )
+
 
         # B,T,C -> T,B,C
 
@@ -465,9 +591,9 @@ def train_one_epoch():
         )
 
 
-        # ----------------------------------------------
-        # Sequence lengths
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Input lengths
+        # --------------------------------------------------
 
         input_lengths = torch.full(
 
@@ -483,6 +609,10 @@ def train_one_epoch():
         )
 
 
+        # --------------------------------------------------
+        # Target lengths
+        # --------------------------------------------------
+
         target_lengths = (
             get_target_lengths(
                 labels
@@ -490,9 +620,9 @@ def train_one_epoch():
         )
 
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # CTC Loss
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         loss = criterion(
 
@@ -506,12 +636,16 @@ def train_one_epoch():
         )
 
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # Backpropagation
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         loss.backward()
 
+
+        # --------------------------------------------------
+        # Gradient clipping
+        # --------------------------------------------------
 
         torch.nn.utils.clip_grad_norm_(
 
@@ -539,7 +673,8 @@ def train_one_epoch():
 
     average_loss = (
 
-        total_loss /
+        total_loss
+        /
         len(train_loader)
     )
 
@@ -570,27 +705,33 @@ def validate():
     for images, labels in progress_bar:
 
         images = images.to(
+
             DEVICE,
+
             non_blocking=True
         )
 
         labels = labels.to(
+
             DEVICE,
+
             non_blocking=True
         )
 
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # Forward
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         outputs = model(
             images
         )
 
+
         outputs = outputs.log_softmax(
             dim=2
         )
+
 
         outputs = outputs.permute(
             1,
@@ -599,9 +740,9 @@ def validate():
         )
 
 
-        # ----------------------------------------------
-        # Lengths
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Input lengths
+        # --------------------------------------------------
 
         input_lengths = torch.full(
 
@@ -617,6 +758,10 @@ def validate():
         )
 
 
+        # --------------------------------------------------
+        # Target lengths
+        # --------------------------------------------------
+
         target_lengths = (
             get_target_lengths(
                 labels
@@ -624,9 +769,9 @@ def validate():
         )
 
 
-        # ----------------------------------------------
-        # Validation Loss
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Validation CTC loss
+        # --------------------------------------------------
 
         loss = criterion(
 
@@ -654,7 +799,8 @@ def validate():
 
     average_loss = (
 
-        total_loss /
+        total_loss
+        /
         len(val_loader)
     )
 
@@ -663,7 +809,7 @@ def validate():
 
 
 # ======================================================
-# Resume Training
+# Resume V3 Training
 # ======================================================
 
 start_epoch = 0
@@ -676,7 +822,11 @@ best_val_loss = float(
 if checkpoint_path.exists():
 
     print(
-        "\nLoading V2 Checkpoint..."
+        "\nV3 Checkpoint Found."
+    )
+
+    print(
+        "Resuming V3 training..."
     )
 
 
@@ -704,7 +854,10 @@ if checkpoint_path.exists():
     )
 
 
-    if "scheduler_state_dict" in checkpoint:
+    if (
+        "scheduler_state_dict"
+        in checkpoint
+    ):
 
         scheduler.load_state_dict(
 
@@ -730,13 +883,12 @@ if checkpoint_path.exists():
 
 
     print(
-        f"Resuming from Epoch "
+        f"Resume Epoch : "
         f"{start_epoch + 1}"
     )
 
-
     print(
-        f"Best Validation Loss: "
+        f"Best Val Loss: "
         f"{best_val_loss:.4f}"
     )
 
@@ -744,7 +896,11 @@ if checkpoint_path.exists():
 else:
 
     print(
-        "\nStarting Fresh V2 Training..."
+        "\nNo V3 checkpoint found."
+    )
+
+    print(
+        "Starting V3 from scratch."
     )
 
 
@@ -753,12 +909,17 @@ else:
 # ======================================================
 
 print("\n========================================")
-print("V2 TRAINING STARTED")
+print("V3 TRAINING STARTED")
 print("========================================")
 
 print(
     "Preprocessing : "
-    "Aspect-ratio preserving resize"
+    "Aspect-ratio preserving + padding"
+)
+
+print(
+    "CTC steps     : "
+    "384"
 )
 
 print(
@@ -767,15 +928,22 @@ print(
 )
 
 print(
-    "Best model by : "
-    "Validation CTC loss"
+    "Best model    : "
+    "Lowest validation CTC loss"
+)
+
+print(
+    "Model files   : "
+    "V3 only"
 )
 
 print("========================================\n")
 
 
 for epoch in range(
+
     start_epoch,
+
     EPOCHS
 ):
 
@@ -784,7 +952,7 @@ for epoch in range(
     )
 
     print(
-        f"Epoch "
+        f"V3 Epoch "
         f"{epoch + 1}/{EPOCHS}"
     )
 
@@ -793,27 +961,27 @@ for epoch in range(
     )
 
 
-    # ----------------------------------------------
+    # --------------------------------------------------
     # Training
-    # ----------------------------------------------
+    # --------------------------------------------------
 
     train_loss = (
         train_one_epoch()
     )
 
 
-    # ----------------------------------------------
+    # --------------------------------------------------
     # Validation
-    # ----------------------------------------------
+    # --------------------------------------------------
 
     val_loss = (
         validate()
     )
 
 
-    # ----------------------------------------------
-    # Scheduler
-    # ----------------------------------------------
+    # --------------------------------------------------
+    # Learning-rate scheduler
+    # --------------------------------------------------
 
     scheduler.step(
         val_loss
@@ -829,22 +997,22 @@ for epoch in range(
     print("\n----------------------------------------")
 
     print(
-        f"Epoch            : "
+        f"Epoch           : "
         f"{epoch + 1}/{EPOCHS}"
     )
 
     print(
-        f"Training Loss    : "
+        f"Training Loss   : "
         f"{train_loss:.4f}"
     )
 
     print(
-        f"Validation Loss  : "
+        f"Validation Loss : "
         f"{val_loss:.4f}"
     )
 
     print(
-        f"Learning Rate    : "
+        f"Learning Rate   : "
         f"{current_lr:.8f}"
     )
 
@@ -887,7 +1055,10 @@ for epoch in range(
                 train_indices,
 
             "val_indices":
-                val_indices
+                val_indices,
+
+            "ctc_time_steps":
+                CTC_TIME_STEPS
 
         },
 
@@ -896,12 +1067,12 @@ for epoch in range(
 
 
     print(
-        "Checkpoint Saved"
+        "✓ V3 Checkpoint Saved"
     )
 
 
     # ==================================================
-    # Save Best Validation Model
+    # Best Model
     # ==================================================
 
     if val_loss < best_val_loss:
@@ -920,11 +1091,11 @@ for epoch in range(
 
 
         print(
-            "✅ Best V2 Model Updated"
+            "✓ BEST V3 MODEL UPDATED"
         )
 
         print(
-            f"New Best Validation Loss: "
+            f"Best Validation Loss: "
             f"{best_val_loss:.4f}"
         )
 
@@ -942,7 +1113,7 @@ torch.save(
 
 
 print("\n========================================")
-print("V2 TRAINING COMPLETED")
+print("V3 TRAINING COMPLETED")
 print("========================================")
 
 print(
