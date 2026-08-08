@@ -3,6 +3,7 @@ import json
 import cv2
 import pandas as pd
 import torch
+
 from torch.utils.data import Dataset
 
 from src.config import *
@@ -65,20 +66,22 @@ class HMEDataset(Dataset):
         )
 
     # ==================================================
-    # Resize while preserving aspect ratio
+    # Resize With Aspect Ratio Preservation
     # ==================================================
 
     def resize_with_padding(self, image):
 
         """
-        Resize image without stretching the handwritten
-        mathematical expression.
+        Resize handwritten mathematical expression
+        while preserving the original aspect ratio.
 
-        Final image size:
+        Final output:
             IMAGE_HEIGHT x IMAGE_WIDTH
 
-        The aspect ratio is preserved and unused space
-        is filled with white pixels.
+        The remaining area is filled with white pixels.
+
+        The expression is vertically centered and
+        left aligned for left-to-right CTC recognition.
         """
 
         original_height, original_width = image.shape[:2]
@@ -90,9 +93,9 @@ class HMEDataset(Dataset):
                 f"{original_width}x{original_height}"
             )
 
-        # ----------------------------------------------
-        # Calculate scale
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Calculate aspect-ratio preserving scale
+        # --------------------------------------------------
 
         scale = min(
             IMAGE_WIDTH / original_width,
@@ -120,13 +123,16 @@ class HMEDataset(Dataset):
             IMAGE_HEIGHT
         )
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # Resize
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         interpolation = (
+
             cv2.INTER_AREA
+
             if scale < 1.0
+
             else cv2.INTER_CUBIC
         )
 
@@ -136,9 +142,9 @@ class HMEDataset(Dataset):
             interpolation=interpolation
         )
 
-        # ----------------------------------------------
-        # Create white canvas
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # White canvas
+        # --------------------------------------------------
 
         canvas = (
             torch.ones(
@@ -152,13 +158,10 @@ class HMEDataset(Dataset):
             * 255
         ).numpy()
 
-        # ----------------------------------------------
-        # Center vertically
-        #
-        # Keep image LEFT aligned horizontally.
-        # This is useful because CTC reads features
-        # from left to right.
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Vertical centering
+        # Horizontal left alignment
+        # --------------------------------------------------
 
         y_offset = (
             IMAGE_HEIGHT - new_height
@@ -197,24 +200,26 @@ class HMEDataset(Dataset):
                 f"Cannot read image: {image_path}"
             )
 
+        # --------------------------------------------------
         # BGR -> RGB
+        # --------------------------------------------------
 
         image = cv2.cvtColor(
             image,
             cv2.COLOR_BGR2RGB
         )
 
-        # ----------------------------------------------
+        # --------------------------------------------------
         # Aspect-ratio preserving preprocessing
-        # ----------------------------------------------
+        # --------------------------------------------------
 
         image = self.resize_with_padding(
             image
         )
 
-        # ----------------------------------------------
-        # Normalize
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Normalize to [0, 1]
+        # --------------------------------------------------
 
         image = (
             image.astype("float32")
@@ -225,7 +230,9 @@ class HMEDataset(Dataset):
             image
         ).float()
 
+        # --------------------------------------------------
         # HWC -> CHW
+        # --------------------------------------------------
 
         image = image.permute(
             2,
@@ -233,9 +240,9 @@ class HMEDataset(Dataset):
             1
         )
 
-        # ----------------------------------------------
-        # Label
-        # ----------------------------------------------
+        # --------------------------------------------------
+        # Encode label
+        # --------------------------------------------------
 
         label = self.encode_label(
             row["label"]

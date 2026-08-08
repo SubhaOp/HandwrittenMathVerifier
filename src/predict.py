@@ -43,26 +43,133 @@ model.eval()
 
 print("✅ Model Loaded Successfully")
 
-
-# ======================================================
-# Image Preprocessing
-# ======================================================
-
+#preprocess image to match training preprocessing
 def preprocess(image_path):
 
     image = cv2.imread(str(image_path))
 
     if image is None:
-        raise FileNotFoundError(f"Cannot read image: {image_path}")
+        raise FileNotFoundError(
+            f"Cannot read image: {image_path}"
+        )
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    image = cv2.resize(
+    # BGR -> RGB
+    image = cv2.cvtColor(
         image,
-        (IMAGE_WIDTH, IMAGE_HEIGHT)
+        cv2.COLOR_BGR2RGB
     )
 
-    image = image.astype("float32") / 255.0
+    # ==================================================
+    # Aspect-ratio preserving preprocessing
+    # SAME preprocessing used during V2 training
+    # ==================================================
+
+    original_height, original_width = image.shape[:2]
+
+    if original_height <= 0 or original_width <= 0:
+        raise ValueError(
+            f"Invalid image dimensions: "
+            f"{original_width}x{original_height}"
+        )
+
+    # Calculate scale while preserving aspect ratio
+    scale = min(
+        IMAGE_WIDTH / original_width,
+        IMAGE_HEIGHT / original_height
+    )
+
+    new_width = max(
+        1,
+        int(round(original_width * scale))
+    )
+
+    new_height = max(
+        1,
+        int(round(original_height * scale))
+    )
+
+    # Safety
+    new_width = min(
+        new_width,
+        IMAGE_WIDTH
+    )
+
+    new_height = min(
+        new_height,
+        IMAGE_HEIGHT
+    )
+
+    # Same interpolation strategy as dataset.py
+    interpolation = (
+        cv2.INTER_AREA
+        if scale < 1.0
+        else cv2.INTER_CUBIC
+    )
+
+    resized = cv2.resize(
+        image,
+        (new_width, new_height),
+        interpolation=interpolation
+    )
+
+    # ==================================================
+    # Create white canvas
+    # ==================================================
+
+    canvas = (
+        torch.ones(
+            (
+                IMAGE_HEIGHT,
+                IMAGE_WIDTH,
+                CHANNELS
+            ),
+            dtype=torch.uint8
+        ).numpy()
+        * 255
+    )
+
+    # ==================================================
+    # Vertical centering
+    # Horizontal LEFT alignment
+    #
+    # This must match dataset.py
+    # ==================================================
+
+    y_offset = (
+        IMAGE_HEIGHT - new_height
+    ) // 2
+
+    x_offset = 0
+
+    canvas[
+        y_offset:y_offset + new_height,
+        x_offset:x_offset + new_width
+    ] = resized
+
+    # ==================================================
+    # Normalize
+    # ==================================================
+
+    image = (
+        canvas.astype("float32")
+        / 255.0
+    )
+
+    # HWC -> CHW
+    image = torch.from_numpy(
+        image
+    ).float()
+
+    image = image.permute(
+        2,
+        0,
+        1
+    )
+
+    # Add batch dimension
+    image = image.unsqueeze(0)
+
+    return image.to(DEVICE)
 
     image = torch.tensor(
         image,
