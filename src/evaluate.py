@@ -26,7 +26,7 @@ from src.config import (
 
 # Start small because beam search is much slower.
 # After confirming it works, increase this.
-MAX_SAMPLES = 24607
+MAX_SAMPLES = 1000
 
 BEAM_WIDTH = 10
 

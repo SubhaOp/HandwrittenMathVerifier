@@ -2,8 +2,6 @@ import random
 
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-import csv
 
 from tqdm import tqdm
 
@@ -29,28 +27,9 @@ VALIDATION_RATIO = 0.10
 
 RANDOM_SEED = 42
 
-# ======================================================
-# EPOCH STUDY CONFIGURATION
-# ======================================================
-# 100 is ONLY a safety ceiling. It is NOT the required number of epochs.
-# The actual training duration is determined automatically by validation-loss
-# convergence and early stopping.
-MAX_EPOCHS = 100
-EPOCHS = MAX_EPOCHS  # safety ceiling only; early stopping determines actual duration
-
-# IMPORTANT:
-# Set this True for the FIRST epoch-study run so that the
-# experiment starts from epoch 1 instead of resuming the old
-# completed V3 run.
-RESET_EPOCH_STUDY = True
-
-# Early stopping:
-# If validation loss does not improve for this many epochs,
-# training stops automatically.
-EARLY_STOPPING_PATIENCE = 8
-
 # IMPORTANT:
 # V3 now produces approximately 384 CTC time steps.
+
 CTC_TIME_STEPS = 384
 
 
@@ -549,25 +528,6 @@ final_model_path = (
 
 
 # ======================================================
-# Epoch-study output files and history
-# ======================================================
-history_csv_path = MODEL_DIR / "v3_epoch_history.csv"
-history_plot_path = MODEL_DIR / "v3_epoch_analysis.png"
-
-# Keep the epoch experiment separate from the normal V3 model files.
-checkpoint_path = MODEL_DIR / "checkpoint_v3_epoch_study.pth"
-best_model_path = MODEL_DIR / "best_model_v3_epoch_study.pth"
-final_model_path = MODEL_DIR / "math_recognizer_v3_epoch_study.pth"
-
-history = {
-    "epoch": [],
-    "train_loss": [],
-    "val_loss": [],
-    "learning_rate": [],
-}
-
-
-# ======================================================
 # Train One Epoch
 # ======================================================
 
@@ -849,38 +809,107 @@ def validate():
 
 
 # ======================================================
-# Epoch-study start / resume logic
+# Resume V3 Training
 # ======================================================
-start_epoch = 0
-best_val_loss = float("inf")
-no_improvement_epochs = 0
 
-if RESET_EPOCH_STUDY:
-    print("\nEpoch-study mode: STARTING FROM SCRATCH")
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
+start_epoch = 0
+
+best_val_loss = float(
+    "inf"
+)
+
+
+if checkpoint_path.exists():
+
+    print(
+        "\nV3 Checkpoint Found."
+    )
+
+    print(
+        "Resuming V3 training..."
+    )
+
+
+    checkpoint = torch.load(
+
+        checkpoint_path,
+
+        map_location=DEVICE
+    )
+
+
+    model.load_state_dict(
+
+        checkpoint[
+            "model_state_dict"
+        ]
+    )
+
+
+    optimizer.load_state_dict(
+
+        checkpoint[
+            "optimizer_state_dict"
+        ]
+    )
+
+
+    if (
+        "scheduler_state_dict"
+        in checkpoint
+    ):
+
+        scheduler.load_state_dict(
+
+            checkpoint[
+                "scheduler_state_dict"
+            ]
+        )
+
+
+    start_epoch = (
+
+        checkpoint["epoch"]
+        + 1
+    )
+
+
+    best_val_loss = checkpoint.get(
+
+        "best_val_loss",
+
+        float("inf")
+    )
+
+
+    print(
+        f"Resume Epoch : "
+        f"{start_epoch + 1}"
+    )
+
+    print(
+        f"Best Val Loss: "
+        f"{best_val_loss:.4f}"
+    )
+
+
 else:
-    if checkpoint_path.exists():
-        print("\nEpoch-study checkpoint found. Resuming...")
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint.get("epoch", -1) + 1
-        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-        history = checkpoint.get("history", history)
-        print(f"Resume epoch: {start_epoch + 1}")
-        print(f"Best validation loss: {best_val_loss:.4f}")
-    else:
-        print("\nNo epoch-study checkpoint found. Starting from scratch.")
+
+    print(
+        "\nNo V3 checkpoint found."
+    )
+
+    print(
+        "Starting V3 from scratch."
+    )
+
 
 # ======================================================
 # Training
 # ======================================================
 
 print("\n========================================")
-print("V3 EPOCH STUDY TRAINING STARTED")
+print("V3 TRAINING STARTED")
 print("========================================")
 
 print(
@@ -904,19 +933,6 @@ print(
 )
 
 print(
-    f"Maximum epoch safety ceiling: {MAX_EPOCHS}"
-)
-
-print(
-    "Actual epoch count will be determined automatically "
-    "from validation-loss convergence."
-)
-
-print(
-    f"Early stopping patience: {EARLY_STOPPING_PATIENCE}"
-)
-
-print(
     "Model files   : "
     "V3 only"
 )
@@ -928,7 +944,7 @@ for epoch in range(
 
     start_epoch,
 
-    MAX_EPOCHS
+    EPOCHS
 ):
 
     print(
@@ -937,7 +953,7 @@ for epoch in range(
 
     print(
         f"V3 Epoch "
-        f"{epoch + 1}/{MAX_EPOCHS}"
+        f"{epoch + 1}/{EPOCHS}"
     )
 
     print(
@@ -982,7 +998,7 @@ for epoch in range(
 
     print(
         f"Epoch           : "
-        f"{epoch + 1}/{MAX_EPOCHS}"
+        f"{epoch + 1}/{EPOCHS}"
     )
 
     print(
@@ -1002,10 +1018,6 @@ for epoch in range(
 
     print("----------------------------------------")
 
-    history["epoch"].append(epoch + 1)
-    history["train_loss"].append(float(train_loss))
-    history["val_loss"].append(float(val_loss))
-    history["learning_rate"].append(float(current_lr))
 
     # ==================================================
     # Save Checkpoint
@@ -1046,10 +1058,7 @@ for epoch in range(
                 val_indices,
 
             "ctc_time_steps":
-                CTC_TIME_STEPS,
-
-            "history":
-                history
+                CTC_TIME_STEPS
 
         },
 
@@ -1089,121 +1098,6 @@ for epoch in range(
             f"Best Validation Loss: "
             f"{best_val_loss:.4f}"
         )
-        no_improvement_epochs = 0
-    else:
-        no_improvement_epochs += 1
-        print(
-            f"No validation improvement for "
-            f"{no_improvement_epochs}/{EARLY_STOPPING_PATIENCE} epoch(s)."
-        )
-
-    if no_improvement_epochs >= EARLY_STOPPING_PATIENCE:
-        print("\nEARLY STOPPING TRIGGERED")
-        print(
-            f"Validation loss did not improve for "
-            f"{EARLY_STOPPING_PATIENCE} consecutive epochs."
-        )
-        break
-
-
-# ======================================================
-# Save epoch history
-# ======================================================
-
-with open(history_csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow([
-        "epoch",
-        "train_loss",
-        "validation_loss",
-        "learning_rate"
-    ])
-
-    for i in range(len(history["epoch"])):
-        writer.writerow([
-            history["epoch"][i],
-            history["train_loss"][i],
-            history["val_loss"][i],
-            history["learning_rate"][i],
-        ])
-
-
-# ======================================================
-# Plot training/validation loss
-# ======================================================
-
-plt.figure(figsize=(10, 6))
-
-plt.plot(
-    history["epoch"],
-    history["train_loss"],
-    marker="o",
-    label="Training Loss"
-)
-
-plt.plot(
-    history["epoch"],
-    history["val_loss"],
-    marker="o",
-    label="Validation Loss"
-)
-
-if best_epoch > 0:
-    best_loss = min(history["val_loss"])
-
-    plt.axvline(
-        best_epoch,
-        linestyle="--",
-        label=f"Best Epoch = {best_epoch}"
-    )
-
-    plt.scatter(
-        [best_epoch],
-        [best_loss],
-        s=80,
-        label=f"Best Val Loss = {best_loss:.4f}"
-    )
-
-plt.xlabel("Epoch")
-plt.ylabel("CTC Loss")
-plt.title("V3 Training vs Validation Loss")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-plt.savefig(history_plot_path, dpi=200)
-plt.show()
-
-print("\n========================================")
-print("EPOCH ANALYSIS")
-print("========================================")
-actual_epochs = len(history["epoch"])
-
-print(f"Actual Epochs Trained   : {actual_epochs}")
-print(f"Best Epoch              : {best_epoch}")
-print(f"Best Validation Loss    : {best_val_loss:.4f}")
-print(f"Epoch history CSV       : {history_csv_path}")
-print(f"Epoch analysis graph    : {history_plot_path}")
-
-if actual_epochs < MAX_EPOCHS:
-    print(
-        "Conclusion: training stopped automatically after "
-        f"{actual_epochs} epochs."
-    )
-    print(
-        f"Use epoch {best_epoch} as the selected training checkpoint "
-        "because it achieved the minimum validation CTC loss."
-    )
-else:
-    print(
-        "Conclusion: the model was still improving enough to reach "
-        f"the safety ceiling of {MAX_EPOCHS} epochs."
-    )
-    print(
-        "The required epoch count is not yet established; "
-        "increase the safety ceiling and repeat the experiment."
-    )
-
-print("========================================")
 
 
 # ======================================================
@@ -1237,17 +1131,9 @@ print(
     f"{final_model_path}"
 )
 
-print(f"Actual Epochs Trained: {actual_epochs}")
-print(f"Best Epoch (minimum validation loss): {best_epoch_from_history}")
-print(f"Best Validation Loss: {best_val_loss:.4f}")
-print(f"Epoch history CSV: {history_csv_path}")
-print(f"Epoch analysis graph: {history_plot_path}")
-
-if actual_epochs < MAX_EPOCHS:
-    print(f"Conclusion: training stopped automatically after {actual_epochs} epochs.")
-    print(f"Selected epoch for the report: {best_epoch_from_history}")
-else:
-    print(f"Conclusion: the safety ceiling of {MAX_EPOCHS} epochs was reached.")
-    print("Increase MAX_EPOCHS and repeat the epoch study before claiming convergence.")
+print(
+    f"Best Validation Loss: "
+    f"{best_val_loss:.4f}"
+)
 
 print("========================================")
