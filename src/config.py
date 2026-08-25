@@ -30,7 +30,7 @@ if IS_KAGGLE:
     # HME100K copied to Kaggle working SSD
     DATASET_DIR = Path(
         "/kaggle/working/dataset/"
-        "hme100k-handwritten-mathematical-expressions"
+        "hme100k-handwritten-mathematical-expressions/HME100K"
     )
 
     # Models saved in the Kaggle project workspace
