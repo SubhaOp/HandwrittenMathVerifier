@@ -16,12 +16,27 @@ import torch
 # ======================================================
 
 IS_COLAB = os.path.exists("/content")
+IS_KAGGLE = os.path.exists("/kaggle")
 
 # ======================================================
 # Project Root
 # ======================================================
 
-if IS_COLAB:
+if IS_KAGGLE:
+
+    # GitHub project cloned in Kaggle
+    PROJECT_ROOT = Path("/kaggle/working/HandwrittenMathVerifier")
+
+    # HME100K copied to Kaggle working SSD
+    DATASET_DIR = Path(
+        "/kaggle/working/dataset/"
+        "hme100k-handwritten-mathematical-expressions"
+    )
+
+    # Models saved in the Kaggle project workspace
+    MODEL_DIR = PROJECT_ROOT / "saved_models"
+
+elif IS_COLAB:
 
     # GitHub project cloned in Colab
     PROJECT_ROOT = Path("/content/HandwrittenMathVerifier")
@@ -84,7 +99,7 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-4
 EPOCHS = 30
 
-NUM_WORKERS = 2 if IS_COLAB else 4
+NUM_WORKERS = 2 if (IS_COLAB or IS_KAGGLE) else 4
 
 # ======================================================
 # Device
@@ -107,7 +122,9 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 60)
 
-if IS_COLAB:
+if IS_KAGGLE:
+    print("Running on Kaggle")
+elif IS_COLAB:
     print("Running on Google Colab")
 else:
     print("Running on Local Machine")
