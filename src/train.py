@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -42,7 +43,7 @@ EPOCHS = MAX_EPOCHS  # safety ceiling only; early stopping determines actual dur
 # Set this True for the FIRST epoch-study run so that the
 # experiment starts from epoch 1 instead of resuming the old
 # completed V3 run.
-RESET_EPOCH_STUDY = True
+RESET_EPOCH_STUDY = False
 
 # Early stopping:
 # If validation loss does not improve for this many epochs,
@@ -549,15 +550,28 @@ final_model_path = (
 
 
 # ======================================================
-# Epoch-study output files and history
+# Epoch-study output files, checkpoints and history
 # ======================================================
-history_csv_path = MODEL_DIR / "v3_epoch_history.csv"
-history_plot_path = MODEL_DIR / "v3_epoch_analysis.png"
+# On Kaggle, /kaggle/working is the writable output directory.
+# Locally, fall back to MODEL_DIR.
+KAGGLE_OUTPUT_DIR = (
+    Path("/kaggle/working")
+    if Path("/kaggle/working").exists()
+    else Path(MODEL_DIR)
+)
 
-# Keep the epoch experiment separate from the normal V3 model files.
-checkpoint_path = MODEL_DIR / "checkpoint_v3_epoch_study.pth"
-best_model_path = MODEL_DIR / "best_model_v3_epoch_study.pth"
-final_model_path = MODEL_DIR / "math_recognizer_v3_epoch_study.pth"
+EPOCH_STUDY_DIR = KAGGLE_OUTPUT_DIR / "epoch_study"
+CHECKPOINT_DIR = EPOCH_STUDY_DIR / "checkpoints"
+EPOCH_STUDY_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+history_csv_path = EPOCH_STUDY_DIR / "v3_epoch_history.csv"
+history_plot_path = EPOCH_STUDY_DIR / "v3_epoch_analysis.png"
+
+# These are separate from the normal V3 model files.
+checkpoint_path = CHECKPOINT_DIR / "latest_checkpoint.pth"
+best_model_path = EPOCH_STUDY_DIR / "best_model_v3_epoch_study.pth"
+final_model_path = EPOCH_STUDY_DIR / "math_recognizer_v3_epoch_study.pth"
 
 history = {
     "epoch": [],
@@ -853,27 +867,39 @@ def validate():
 # ======================================================
 start_epoch = 0
 best_val_loss = float("inf")
+best_epoch = 0
 no_improvement_epochs = 0
 
 if RESET_EPOCH_STUDY:
     print("\nEpoch-study mode: STARTING FROM SCRATCH")
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
 else:
     if checkpoint_path.exists():
         print("\nEpoch-study checkpoint found. Resuming...")
         checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint.get("epoch", -1) + 1
-        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-        history = checkpoint.get("history", history)
-        print(f"Resume epoch: {start_epoch + 1}")
+
+        start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        best_epoch = int(checkpoint.get("best_epoch", 0))
+        no_improvement_epochs = int(
+            checkpoint.get("no_improvement_epochs", 0)
+        )
+
+        saved_history = checkpoint.get("history")
+        if saved_history is not None:
+            history = saved_history
+
+        print(f"Resume from epoch: {start_epoch + 1}")
         print(f"Best validation loss: {best_val_loss:.4f}")
+        print(f"Best epoch so far: {best_epoch}")
     else:
         print("\nNo epoch-study checkpoint found. Starting from scratch.")
+
 
 # ======================================================
 # Training
@@ -1008,94 +1034,81 @@ for epoch in range(
     history["learning_rate"].append(float(current_lr))
 
     # ==================================================
-    # Save Checkpoint
-    # ==================================================
-
-    torch.save(
-
-        {
-
-            "epoch":
-                epoch,
-
-            "model_state_dict":
-                model.state_dict(),
-
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "scheduler_state_dict":
-                scheduler.state_dict(),
-
-            "train_loss":
-                train_loss,
-
-            "val_loss":
-                val_loss,
-
-            "best_val_loss":
-                min(
-                    best_val_loss,
-                    val_loss
-                ),
-
-            "train_indices":
-                train_indices,
-
-            "val_indices":
-                val_indices,
-
-            "ctc_time_steps":
-                CTC_TIME_STEPS,
-
-            "history":
-                history
-
-        },
-
-        checkpoint_path
-    )
-
-
-    print(
-        "✓ V3 Checkpoint Saved"
-    )
-
-
-    # ==================================================
-    # Best Model
+    # Update best epoch / early stopping state
     # ==================================================
 
     if val_loss < best_val_loss:
-
-        best_val_loss = (
-            val_loss
-        )
-
+        best_val_loss = float(val_loss)
+        best_epoch = epoch + 1
+        no_improvement_epochs = 0
 
         torch.save(
-
             model.state_dict(),
-
             best_model_path
         )
 
-
-        print(
-            "✓ BEST V3 MODEL UPDATED"
-        )
-
-        print(
-            f"Best Validation Loss: "
-            f"{best_val_loss:.4f}"
-        )
-        no_improvement_epochs = 0
+        print("✓ BEST V3 MODEL UPDATED")
+        print(f"Best Validation Loss: {best_val_loss:.4f}")
+        print(f"Best Epoch: {best_epoch}")
     else:
         no_improvement_epochs += 1
         print(
             f"No validation improvement for "
             f"{no_improvement_epochs}/{EARLY_STOPPING_PATIENCE} epoch(s)."
         )
+
+    # ==================================================
+    # Save checkpoint after EVERY epoch
+    # ==================================================
+
+    checkpoint_data = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "train_loss": float(train_loss),
+        "val_loss": float(val_loss),
+        "best_val_loss": float(best_val_loss),
+        "best_epoch": int(best_epoch),
+        "no_improvement_epochs": int(no_improvement_epochs),
+        "ctc_time_steps": CTC_TIME_STEPS,
+        "history": history,
+    }
+
+    # One rolling checkpoint used for automatic resume.
+    torch.save(
+        checkpoint_data,
+        checkpoint_path
+    )
+
+    # A permanent checkpoint for this specific epoch.
+    epoch_checkpoint_path = (
+        CHECKPOINT_DIR / f"checkpoint_epoch_{epoch + 1:03d}.pth"
+    )
+    torch.save(
+        checkpoint_data,
+        epoch_checkpoint_path
+    )
+
+    print(f"✓ Checkpoint saved: {epoch_checkpoint_path}")
+
+    # Save the history after every epoch as well.
+    with open(history_csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "epoch",
+            "train_loss",
+            "validation_loss",
+            "learning_rate"
+        ])
+
+        for i in range(len(history["epoch"])):
+            writer.writerow([
+                history["epoch"][i],
+                history["train_loss"][i],
+                history["val_loss"][i],
+                history["learning_rate"][i],
+            ])
 
     if no_improvement_epochs >= EARLY_STOPPING_PATIENCE:
         print("\nEARLY STOPPING TRIGGERED")
@@ -1148,8 +1161,13 @@ plt.plot(
     label="Validation Loss"
 )
 
-if best_epoch > 0:
-    best_loss = min(history["val_loss"])
+if history["val_loss"]:
+    best_idx = min(
+        range(len(history["val_loss"])),
+        key=lambda i: history["val_loss"][i]
+    )
+    best_epoch = history["epoch"][best_idx]
+    best_loss = history["val_loss"][best_idx]
 
     plt.axvline(
         best_epoch,
@@ -1238,14 +1256,16 @@ print(
 )
 
 print(f"Actual Epochs Trained: {actual_epochs}")
-print(f"Best Epoch (minimum validation loss): {best_epoch_from_history}")
+print(f"Best Epoch (minimum validation loss): {best_epoch}")
 print(f"Best Validation Loss: {best_val_loss:.4f}")
 print(f"Epoch history CSV: {history_csv_path}")
 print(f"Epoch analysis graph: {history_plot_path}")
+print(f"Checkpoint directory: {CHECKPOINT_DIR}")
+print(f"Best model: {best_model_path}")
 
 if actual_epochs < MAX_EPOCHS:
     print(f"Conclusion: training stopped automatically after {actual_epochs} epochs.")
-    print(f"Selected epoch for the report: {best_epoch_from_history}")
+    print(f"Selected epoch for the report: {best_epoch}")
 else:
     print(f"Conclusion: the safety ceiling of {MAX_EPOCHS} epochs was reached.")
     print("Increase MAX_EPOCHS and repeat the epoch study before claiming convergence.")
