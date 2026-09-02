@@ -1,1332 +1,221 @@
-import random
+"""
+Global Configuration
+Handwritten Mathematical Expression Recognition
+
+Environment-aware configuration for:
+- Google Colab
+- Kaggle
+- Local Windows/Linux
+
+The dataset path is detected automatically from known locations.
+"""
+
+import os
 from pathlib import Path
-
 import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
-import csv
 
-from tqdm import tqdm
 
-from torch.utils.data import (
-    DataLoader,
-    Subset
+# ======================================================
+# Detect Environment
+# ======================================================
+
+IS_COLAB = os.path.exists("/content") and (
+    "COLAB_RELEASE_TAG" in os.environ
+    or os.path.exists("/content/drive")
 )
 
-from torch.nn.utils.rnn import (
-    pad_sequence
-)
-
-from src.config import *
-from src.dataset import HMEDataset
-from src.model import MathRecognizer
+IS_KAGGLE = os.path.exists("/kaggle/working")
 
 
 # ======================================================
-# V3 Configuration
+# Project Root + Dataset
 # ======================================================
 
-VALIDATION_RATIO = 0.10
+if IS_COLAB:
 
-RANDOM_SEED = 42
+    PROJECT_ROOT = Path("/content/HandwrittenMathVerifier")
 
-# ======================================================
-# EPOCH STUDY CONFIGURATION
-# ======================================================
-# 100 is ONLY a safety ceiling. It is NOT the required number of epochs.
-# The actual training duration is determined automatically by validation-loss
-# convergence and early stopping.
-MAX_EPOCHS = 100
-EPOCHS = MAX_EPOCHS  # safety ceiling only; early stopping determines actual duration
+    # Possible HME100K locations in Colab.
+    DATASET_CANDIDATES = [
+        Path("/content/HME100K"),
+        PROJECT_ROOT / "HME100K",
+        Path("/content/drive/MyDrive/HandwrittenMathVerifier/HME100K"),
+        Path("/content/drive/MyDrive/HME100K"),
+    ]
 
-# IMPORTANT:
-# Set this True for the FIRST epoch-study run so that the
-# experiment starts from epoch 1 instead of resuming the old
-# completed V3 run.
-RESET_EPOCH_STUDY = False
+    DATASET_DIR = None
 
-# Early stopping:
-# If validation loss does not improve for this many epochs,
-# training stops automatically.
-EARLY_STOPPING_PATIENCE = 8
+    for candidate in DATASET_CANDIDATES:
+        if (
+            (candidate / "train" / "train_images").exists()
+            and (candidate / "train" / "train_labels.txt").exists()
+        ):
+            DATASET_DIR = candidate
+            break
 
-# IMPORTANT:
-# V3 now produces approximately 384 CTC time steps.
-CTC_TIME_STEPS = 384
+    if DATASET_DIR is None:
+        # Default expected location. A clear error is raised below.
+        DATASET_DIR = Path("/content/HME100K")
 
-
-# ======================================================
-# Reproducibility
-# ======================================================
-
-random.seed(
-    RANDOM_SEED
-)
-
-torch.manual_seed(
-    RANDOM_SEED
-)
-
-if torch.cuda.is_available():
-
-    torch.cuda.manual_seed_all(
-        RANDOM_SEED
+    # Permanent model/epoch-study storage.
+    DRIVE_MODEL_DIR = Path(
+        "/content/drive/MyDrive/HandwrittenMathVerifier/saved_models"
     )
 
-
-# ======================================================
-# Print Device
-# ======================================================
-
-print("\n========================================")
-print("V3 TRAINING")
-print("========================================")
-
-print(
-    f"Device : {DEVICE}"
-)
-
-if torch.cuda.is_available():
-
-    print(
-        f"GPU    : "
-        f"{torch.cuda.get_device_name(0)}"
-    )
-
-print("========================================\n")
-
-
-# ======================================================
-# Collate Function
-# ======================================================
-
-def collate_fn(batch):
-
-    images = []
-
-    labels = []
-
-    for image, label in batch:
-
-        images.append(image)
-
-        labels.append(label)
-
-    images = torch.stack(
-        images
-    )
-
-    labels = pad_sequence(
-        labels,
-        batch_first=True,
-        padding_value=0
-    )
-
-    return images, labels
-
-
-# ======================================================
-# Target Lengths
-# ======================================================
-
-def get_target_lengths(labels):
-
-    """
-    Padding / CTC blank ID = 0.
-
-    Actual target characters use non-zero IDs.
-    """
-
-    return torch.tensor(
-
-        [
-            torch.count_nonzero(
-                label
-            ).item()
-
-            for label in labels
-        ],
-
-        dtype=torch.long,
-
-        device=labels.device
-    )
-
-
-# ======================================================
-# Load Dataset
-# ======================================================
-
-print("\nLoading Dataset...")
-
-dataset = HMEDataset()
-
-print(
-    f"Original Dataset Samples : "
-    f"{len(dataset)}"
-)
-
-
-# ======================================================
-# CTC Validity Filtering
-# ======================================================
-
-print(
-    "\nChecking CTC validity..."
-)
-
-valid_indices = []
-
-invalid_indices = []
-
-
-for idx in tqdm(
-
-    range(len(dataset)),
-
-    desc="Checking labels"
-):
-
-    row = dataset.df.iloc[idx]
-
-    label = dataset.encode_label(
-        row["label"]
-    )
-
-    target_length = len(label)
-
-    # --------------------------------------------------
-    # Repeated adjacent labels require an extra CTC
-    # blank position.
-    # --------------------------------------------------
-
-    if target_length > 1:
-
-        repeats = int(
-
-            (
-                label[1:]
-                ==
-                label[:-1]
-            )
-            .sum()
-            .item()
-        )
-
+    if Path("/content/drive/MyDrive").exists():
+        MODEL_DIR = DRIVE_MODEL_DIR
     else:
+        MODEL_DIR = PROJECT_ROOT / "saved_models"
 
-        repeats = 0
 
-    required_steps = (
-        target_length
-        +
-        repeats
-    )
+elif IS_KAGGLE:
 
-    if required_steps <= CTC_TIME_STEPS:
+    PROJECT_ROOT = Path("/kaggle/working/HandwrittenMathVerifier")
 
-        valid_indices.append(
-            idx
-        )
+    DATASET_CANDIDATES = [
+        Path("/kaggle/working/HME100K"),
+        Path("/kaggle/input/hme100k"),
+        Path("/kaggle/input/hme100k-handwritten-mathematical-expressions/HME100K"),
+        Path("/kaggle/working/dataset/hme100k-handwritten-mathematical-expressions/HME100K"),
+    ]
 
-    else:
+    DATASET_DIR = None
 
-        invalid_indices.append(
-            idx
-        )
+    for candidate in DATASET_CANDIDATES:
+        if (
+            (candidate / "train" / "train_images").exists()
+            and (candidate / "train" / "train_labels.txt").exists()
+        ):
+            DATASET_DIR = candidate
+            break
 
+    if DATASET_DIR is None:
+        DATASET_DIR = DATASET_CANDIDATES[0]
 
-print("\n========================================")
-print("V3 CTC Dataset Filtering")
-print("========================================")
+    MODEL_DIR = PROJECT_ROOT / "saved_models"
 
-print(
-    f"Original Samples : "
-    f"{len(dataset)}"
-)
-
-print(
-    f"Valid Samples    : "
-    f"{len(valid_indices)}"
-)
-
-print(
-    f"Filtered Samples : "
-    f"{len(invalid_indices)}"
-)
-
-print("========================================")
-
-
-# ======================================================
-# Train / Validation Split
-# ======================================================
-
-generator = torch.Generator()
-
-generator.manual_seed(
-    RANDOM_SEED
-)
-
-
-permutation = torch.randperm(
-
-    len(valid_indices),
-
-    generator=generator
-).tolist()
-
-
-validation_size = int(
-
-    len(valid_indices)
-    *
-    VALIDATION_RATIO
-)
-
-validation_size = max(
-    1,
-    validation_size
-)
-
-
-val_positions = permutation[
-    :validation_size
-]
-
-train_positions = permutation[
-    validation_size:
-]
-
-
-train_indices = [
-
-    valid_indices[i]
-
-    for i in train_positions
-]
-
-
-val_indices = [
-
-    valid_indices[i]
-
-    for i in val_positions
-]
-
-
-train_dataset = Subset(
-
-    dataset,
-
-    train_indices
-)
-
-
-val_dataset = Subset(
-
-    dataset,
-
-    val_indices
-)
-
-
-print("\n========================================")
-print("V3 Dataset Split")
-print("========================================")
-
-print(
-    f"Training Samples   : "
-    f"{len(train_dataset)}"
-)
-
-print(
-    f"Validation Samples : "
-    f"{len(val_dataset)}"
-)
-
-print("========================================")
-
-
-# ======================================================
-# DataLoaders
-# ======================================================
-
-train_loader = DataLoader(
-
-    train_dataset,
-
-    batch_size=BATCH_SIZE,
-
-    shuffle=True,
-
-    num_workers=NUM_WORKERS,
-
-    pin_memory=torch.cuda.is_available(),
-
-    collate_fn=collate_fn
-)
-
-
-val_loader = DataLoader(
-
-    val_dataset,
-
-    batch_size=BATCH_SIZE,
-
-    shuffle=False,
-
-    num_workers=NUM_WORKERS,
-
-    pin_memory=torch.cuda.is_available(),
-
-    collate_fn=collate_fn
-)
-
-
-# ======================================================
-# Create Model
-# ======================================================
-
-num_classes = (
-    len(dataset.char2idx)
-    + 1
-)
-
-
-model = MathRecognizer(
-    num_classes
-).to(DEVICE)
-
-
-print("\nModel Created Successfully")
-
-print(
-    f"Number of Classes : "
-    f"{num_classes}"
-)
-
-print(model)
-
-
-# ======================================================
-# Verify Sequence Length
-# ======================================================
-
-print(
-    "\nChecking V3 model output shape..."
-)
-
-
-with torch.no_grad():
-
-    test_input = torch.zeros(
-
-        1,
-        CHANNELS,
-        IMAGE_HEIGHT,
-        IMAGE_WIDTH,
-
-        device=DEVICE
-    )
-
-    test_output = model(
-        test_input
-    )
-
-
-print(
-    f"Input Shape  : "
-    f"{tuple(test_input.shape)}"
-)
-
-print(
-    f"Output Shape : "
-    f"{tuple(test_output.shape)}"
-)
-
-
-if test_output.shape[1] != CTC_TIME_STEPS:
-
-    raise RuntimeError(
-
-        "V3 sequence length mismatch! "
-
-        f"Expected {CTC_TIME_STEPS}, "
-
-        f"got {test_output.shape[1]}"
-    )
-
-
-print(
-    "✓ V3 sequence length verified."
-)
-
-
-del test_input
-del test_output
-
-if torch.cuda.is_available():
-
-    torch.cuda.empty_cache()
-
-
-# ======================================================
-# CTC Loss
-# ======================================================
-
-criterion = nn.CTCLoss(
-
-    blank=0,
-
-    zero_infinity=True
-)
-
-
-# ======================================================
-# Optimizer
-# ======================================================
-
-optimizer = torch.optim.AdamW(
-
-    model.parameters(),
-
-    lr=LEARNING_RATE,
-
-    weight_decay=1e-4
-)
-
-
-# ======================================================
-# Scheduler
-# ======================================================
-
-scheduler = (
-
-    torch.optim.lr_scheduler.ReduceLROnPlateau(
-
-        optimizer,
-
-        mode="min",
-
-        factor=0.5,
-
-        patience=2,
-
-        min_lr=1e-6
-    )
-)
-
-
-# ======================================================
-# V3 Model Paths
-#
-# IMPORTANT:
-# These are completely separate from V2.
-# ======================================================
-
-checkpoint_path = (
-
-    MODEL_DIR
-    /
-    "checkpoint_v3.pth"
-)
-
-
-best_model_path = (
-
-    MODEL_DIR
-    /
-    "best_model_v3.pth"
-)
-
-
-final_model_path = (
-
-    MODEL_DIR
-    /
-    "math_recognizer_v3.pth"
-)
-
-
-# ======================================================
-# Epoch-study output files
-# ======================================================
-# In Google Colab, save checkpoints directly to Google Drive.
-# This means a Colab runtime reset does NOT delete the checkpoint.
-# In Kaggle/local runs, use /kaggle/working or MODEL_DIR.
-# ======================================================
-
-COLAB_DRIVE_ROOT = Path(
-    "/content/drive/MyDrive/HandwrittenMathVerifier"
-)
-
-if COLAB_DRIVE_ROOT.exists():
-    EPOCH_STUDY_DIR = COLAB_DRIVE_ROOT / "epoch_study"
-    print("\nStorage mode: GOOGLE DRIVE")
 else:
-    if Path("/kaggle/working").exists():
-        EPOCH_STUDY_DIR = Path("/kaggle/working/HandwrittenMathVerifier/epoch_study")
-    else:
-        EPOCH_STUDY_DIR = MODEL_DIR / "epoch_study"
-    print("\nStorage mode: LOCAL/KAGGLE")
 
-CHECKPOINT_DIR = EPOCH_STUDY_DIR / "checkpoints"
-EPOCH_STUDY_DIR.mkdir(parents=True, exist_ok=True)
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-
-history_csv_path = EPOCH_STUDY_DIR / "v3_epoch_history.csv"
-history_plot_path = EPOCH_STUDY_DIR / "v3_epoch_analysis.png"
-
-# Rolling checkpoint for automatic resume.
-checkpoint_path = CHECKPOINT_DIR / "latest_checkpoint.pth"
-
-best_model_path = EPOCH_STUDY_DIR / "best_model_v3_epoch_study.pth"
-final_model_path = EPOCH_STUDY_DIR / "math_recognizer_v3_epoch_study.pth"
-
-history = {
-    "epoch": [],
-    "train_loss": [],
-    "val_loss": [],
-    "learning_rate": [],
-}
+    # Local Windows/Linux
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATASET_DIR = PROJECT_ROOT / "dataset"
+    MODEL_DIR = PROJECT_ROOT / "saved_models"
 
 
 # ======================================================
-# Train One Epoch
+# Dataset Paths
 # ======================================================
 
-def train_one_epoch():
+TRAIN_IMAGE_DIR = DATASET_DIR / "train" / "train_images"
+TRAIN_LABEL_FILE = DATASET_DIR / "train" / "train_labels.txt"
 
-    model.train()
-
-    total_loss = 0.0
-
-
-    progress_bar = tqdm(
-
-        train_loader,
-
-        desc="Training"
-    )
+TEST_IMAGE_DIR = DATASET_DIR / "test" / "test_images"
+TEST_LABEL_FILE = DATASET_DIR / "test" / "test_labels.txt"
 
 
-    for images, labels in progress_bar:
+# ======================================================
+# Validate Dataset Path
+# ======================================================
 
-        images = images.to(
+if not TRAIN_IMAGE_DIR.exists() or not TRAIN_LABEL_FILE.exists():
 
-            DEVICE,
-
-            non_blocking=True
-        )
-
-        labels = labels.to(
-
-            DEVICE,
-
-            non_blocking=True
-        )
-
-
-        optimizer.zero_grad(
-            set_to_none=True
-        )
-
-
-        # --------------------------------------------------
-        # Forward
-        # --------------------------------------------------
-
-        outputs = model(
-            images
-        )
-
-
-        outputs = outputs.log_softmax(
-            dim=2
-        )
-
-
-        # B,T,C -> T,B,C
-
-        outputs = outputs.permute(
-            1,
-            0,
-            2
-        )
-
-
-        # --------------------------------------------------
-        # Input lengths
-        # --------------------------------------------------
-
-        input_lengths = torch.full(
-
-            size=(
-                images.size(0),
-            ),
-
-            fill_value=outputs.size(0),
-
-            dtype=torch.long,
-
-            device=DEVICE
-        )
-
-
-        # --------------------------------------------------
-        # Target lengths
-        # --------------------------------------------------
-
-        target_lengths = (
-            get_target_lengths(
-                labels
+    raise FileNotFoundError(
+        "\n\nHME100K DATASET NOT FOUND.\n"
+        f"Expected dataset directory:\n  {DATASET_DIR}\n\n"
+        "The following locations were checked:\n"
+        + "\n".join(
+            f"  - {p}"
+            for p in (
+                DATASET_CANDIDATES
+                if "DATASET_CANDIDATES" in globals()
+                else [DATASET_DIR]
             )
         )
-
-
-        # --------------------------------------------------
-        # CTC Loss
-        # --------------------------------------------------
-
-        loss = criterion(
-
-            outputs,
-
-            labels,
-
-            input_lengths,
-
-            target_lengths
-        )
-
-
-        # --------------------------------------------------
-        # Backpropagation
-        # --------------------------------------------------
-
-        loss.backward()
-
-
-        # --------------------------------------------------
-        # Gradient clipping
-        # --------------------------------------------------
-
-        torch.nn.utils.clip_grad_norm_(
-
-            model.parameters(),
-
-            max_norm=5.0
-        )
-
-
-        optimizer.step()
-
-
-        total_loss += (
-            loss.item()
-        )
-
-
-        progress_bar.set_postfix(
-
-            loss=f"{loss.item():.4f}",
-
-            lr=f"{optimizer.param_groups[0]['lr']:.2e}"
-        )
-
-
-    average_loss = (
-
-        total_loss
-        /
-        len(train_loader)
+        + "\n\n"
+        "For Colab, make sure the dataset is available at:\n"
+        "  /content/HME100K/train/train_images\n"
+        "  /content/HME100K/train/train_labels.txt\n"
     )
-
-
-    return average_loss
 
 
 # ======================================================
-# Validation
+# Config Files
 # ======================================================
 
-@torch.no_grad()
-def validate():
+CONFIG_DIR = PROJECT_ROOT / "configs"
 
-    model.eval()
-
-    total_loss = 0.0
-
-
-    progress_bar = tqdm(
-
-        val_loader,
-
-        desc="Validation"
-    )
-
-
-    for images, labels in progress_bar:
-
-        images = images.to(
-
-            DEVICE,
-
-            non_blocking=True
-        )
-
-        labels = labels.to(
-
-            DEVICE,
-
-            non_blocking=True
-        )
-
-
-        # --------------------------------------------------
-        # Forward
-        # --------------------------------------------------
-
-        outputs = model(
-            images
-        )
-
-
-        outputs = outputs.log_softmax(
-            dim=2
-        )
-
-
-        outputs = outputs.permute(
-            1,
-            0,
-            2
-        )
-
-
-        # --------------------------------------------------
-        # Input lengths
-        # --------------------------------------------------
-
-        input_lengths = torch.full(
-
-            size=(
-                images.size(0),
-            ),
-
-            fill_value=outputs.size(0),
-
-            dtype=torch.long,
-
-            device=DEVICE
-        )
-
-
-        # --------------------------------------------------
-        # Target lengths
-        # --------------------------------------------------
-
-        target_lengths = (
-            get_target_lengths(
-                labels
-            )
-        )
-
-
-        # --------------------------------------------------
-        # Validation CTC loss
-        # --------------------------------------------------
-
-        loss = criterion(
-
-            outputs,
-
-            labels,
-
-            input_lengths,
-
-            target_lengths
-        )
-
-
-        total_loss += (
-            loss.item()
-        )
-
-
-        progress_bar.set_postfix(
-
-            val_loss=
-            f"{loss.item():.4f}"
-        )
-
-
-    average_loss = (
-
-        total_loss
-        /
-        len(val_loader)
-    )
-
-
-    return average_loss
+CHAR2IDX_FILE = CONFIG_DIR / "char2idx.json"
+IDX2CHAR_FILE = CONFIG_DIR / "idx2char.json"
 
 
 # ======================================================
-# Epoch-study start / resume logic
-# ======================================================
-# RESET_EPOCH_STUDY = False -> resume automatically.
-# If latest_checkpoint.pth is missing, the highest numbered
-# checkpoint_epoch_XXX.pth is selected.
+# Outputs
 # ======================================================
 
-start_epoch = 0
-best_val_loss = float("inf")
-best_epoch = 0
-no_improvement_epochs = 0
-resume_checkpoint = None
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
-if RESET_EPOCH_STUDY:
-    print("\nEpoch-study mode: STARTING FROM SCRATCH")
-else:
-    # Prefer the rolling checkpoint.
-    if checkpoint_path.exists():
-        resume_checkpoint = checkpoint_path
-    else:
-        epoch_checkpoints = list(
-            CHECKPOINT_DIR.glob("checkpoint_epoch_*.pth")
-        )
 
-        if epoch_checkpoints:
-            def epoch_number(path):
-                try:
-                    return int(path.stem.split("_")[-1])
-                except ValueError:
-                    return -1
+# ======================================================
+# Image Settings
+# ======================================================
 
-            epoch_checkpoints.sort(key=epoch_number)
-            resume_checkpoint = epoch_checkpoints[-1]
+IMAGE_HEIGHT = 128
+IMAGE_WIDTH = 1536
+CHANNELS = 3
 
-if RESET_EPOCH_STUDY:
-    print("\n========================================")
-    print("EPOCH STUDY: STARTING FROM SCRATCH")
-    print("========================================")
-
-elif resume_checkpoint is not None:
-    print("\n========================================")
-    print("RESUMING EPOCH STUDY")
-    print("========================================")
-    print(f"Checkpoint: {resume_checkpoint}")
-
-    checkpoint = torch.load(
-        resume_checkpoint,
-        map_location=DEVICE,
-        weights_only=False
-    )
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-    if "scheduler_state_dict" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    completed_epoch_index = int(
-        checkpoint.get("epoch", -1)
-    )
-    start_epoch = completed_epoch_index + 1
-
-    best_val_loss = float(
-        checkpoint.get("best_val_loss", float("inf"))
-    )
-    best_epoch = int(checkpoint.get("best_epoch", 0))
-    no_improvement_epochs = int(
-        checkpoint.get("no_improvement_epochs", 0)
-    )
-
-    saved_history = checkpoint.get("history")
-    if saved_history is not None:
-        history = saved_history
-
-    print(f"Last completed epoch : {completed_epoch_index + 1}")
-    print(f"Next epoch           : {start_epoch + 1}")
-    print(f"Best epoch so far    : {best_epoch}")
-    print(f"Best validation loss : {best_val_loss:.4f}")
-    print(f"No-improvement count : {no_improvement_epochs}")
-    print("========================================\n")
-else:
-    print("\n========================================")
-    print("NO EPOCH-STUDY CHECKPOINT FOUND")
-    print("Starting from epoch 1.")
-    print("========================================\n")
 
 # ======================================================
 # Training
 # ======================================================
 
-print("\n========================================")
-print("V3 EPOCH STUDY TRAINING STARTED")
-print("========================================")
+BATCH_SIZE = 32
+LEARNING_RATE = 1e-4
 
-print(
-    "Preprocessing : "
-    "Aspect-ratio preserving + padding"
-)
+# train.py controls the epoch-study ceiling.
+EPOCHS = 30
 
-print(
-    "CTC steps     : "
-    "384"
-)
-
-print(
-    "Validation    : "
-    "10%"
-)
-
-print(
-    "Best model    : "
-    "Lowest validation CTC loss"
-)
-
-print(
-    f"Maximum epoch safety ceiling: {MAX_EPOCHS}"
-)
-
-print(
-    "Actual epoch count will be determined automatically "
-    "from validation-loss convergence."
-)
-
-print(
-    f"Early stopping patience: {EARLY_STOPPING_PATIENCE}"
-)
-
-print(
-    "Model files   : "
-    "V3 only"
-)
-
-print("========================================\n")
-
-
-for epoch in range(
-
-    start_epoch,
-
-    MAX_EPOCHS
-):
-
-    print(
-        f"\n{'=' * 60}"
-    )
-
-    print(
-        f"V3 Epoch "
-        f"{epoch + 1}/{MAX_EPOCHS}"
-    )
-
-    print(
-        f"{'=' * 60}"
-    )
-
-
-    # --------------------------------------------------
-    # Training
-    # --------------------------------------------------
-
-    train_loss = (
-        train_one_epoch()
-    )
-
-
-    # --------------------------------------------------
-    # Validation
-    # --------------------------------------------------
-
-    val_loss = (
-        validate()
-    )
-
-
-    # --------------------------------------------------
-    # Learning-rate scheduler
-    # --------------------------------------------------
-
-    scheduler.step(
-        val_loss
-    )
-
-
-    current_lr = (
-        optimizer
-        .param_groups[0]["lr"]
-    )
-
-
-    print("\n----------------------------------------")
-
-    print(
-        f"Epoch           : "
-        f"{epoch + 1}/{MAX_EPOCHS}"
-    )
-
-    print(
-        f"Training Loss   : "
-        f"{train_loss:.4f}"
-    )
-
-    print(
-        f"Validation Loss : "
-        f"{val_loss:.4f}"
-    )
-
-    print(
-        f"Learning Rate   : "
-        f"{current_lr:.8f}"
-    )
-
-    print("----------------------------------------")
-
-    history["epoch"].append(epoch + 1)
-    history["train_loss"].append(float(train_loss))
-    history["val_loss"].append(float(val_loss))
-    history["learning_rate"].append(float(current_lr))
-
-    # ==================================================
-    # Update best epoch / early stopping state
-    # ==================================================
-
-    if val_loss < best_val_loss:
-        best_val_loss = float(val_loss)
-        best_epoch = epoch + 1
-        no_improvement_epochs = 0
-
-        torch.save(
-            model.state_dict(),
-            best_model_path
-        )
-
-        print("✓ BEST V3 MODEL UPDATED")
-        print(f"Best Validation Loss: {best_val_loss:.4f}")
-        print(f"Best Epoch: {best_epoch}")
-    else:
-        no_improvement_epochs += 1
-        print(
-            f"No validation improvement for "
-            f"{no_improvement_epochs}/{EARLY_STOPPING_PATIENCE} epoch(s)."
-        )
-
-    # ==================================================
-    # Save checkpoint after EVERY epoch
-    # ==================================================
-
-    checkpoint_data = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "train_loss": float(train_loss),
-        "val_loss": float(val_loss),
-        "best_val_loss": float(best_val_loss),
-        "best_epoch": int(best_epoch),
-        "no_improvement_epochs": int(no_improvement_epochs),
-        "ctc_time_steps": CTC_TIME_STEPS,
-        "history": history,
-    }
-
-    # One rolling checkpoint used for automatic resume.
-    torch.save(
-        checkpoint_data,
-        checkpoint_path
-    )
-
-    # A permanent checkpoint for this specific epoch.
-    epoch_checkpoint_path = (
-        CHECKPOINT_DIR / f"checkpoint_epoch_{epoch + 1:03d}.pth"
-    )
-    torch.save(
-        checkpoint_data,
-        epoch_checkpoint_path
-    )
-
-    print(f"✓ Checkpoint saved: {epoch_checkpoint_path}")
-
-    # Save the history after every epoch as well.
-    with open(history_csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "epoch",
-            "train_loss",
-            "validation_loss",
-            "learning_rate"
-        ])
-
-        for i in range(len(history["epoch"])):
-            writer.writerow([
-                history["epoch"][i],
-                history["train_loss"][i],
-                history["val_loss"][i],
-                history["learning_rate"][i],
-            ])
-
-    if no_improvement_epochs >= EARLY_STOPPING_PATIENCE:
-        print("\nEARLY STOPPING TRIGGERED")
-        print(
-            f"Validation loss did not improve for "
-            f"{EARLY_STOPPING_PATIENCE} consecutive epochs."
-        )
-        break
+NUM_WORKERS = 2 if IS_COLAB else 4
 
 
 # ======================================================
-# Save epoch history
+# Device
 # ======================================================
 
-with open(history_csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow([
-        "epoch",
-        "train_loss",
-        "validation_loss",
-        "learning_rate"
-    ])
-
-    for i in range(len(history["epoch"])):
-        writer.writerow([
-            history["epoch"][i],
-            history["train_loss"][i],
-            history["val_loss"][i],
-            history["learning_rate"][i],
-        ])
-
-
-# ======================================================
-# Plot training/validation loss
-# ======================================================
-
-plt.figure(figsize=(10, 6))
-
-plt.plot(
-    history["epoch"],
-    history["train_loss"],
-    marker="o",
-    label="Training Loss"
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
 )
 
-plt.plot(
-    history["epoch"],
-    history["val_loss"],
-    marker="o",
-    label="Validation Loss"
-)
 
-if history["val_loss"]:
-    best_idx = min(
-        range(len(history["val_loss"])),
-        key=lambda i: history["val_loss"][i]
-    )
-    best_epoch = history["epoch"][best_idx]
-    best_loss = history["val_loss"][best_idx]
+# ======================================================
+# Create Directories
+# ======================================================
 
-    plt.axvline(
-        best_epoch,
-        linestyle="--",
-        label=f"Best Epoch = {best_epoch}"
-    )
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    plt.scatter(
-        [best_epoch],
-        [best_loss],
-        s=80,
-        label=f"Best Val Loss = {best_loss:.4f}"
-    )
 
-plt.xlabel("Epoch")
-plt.ylabel("CTC Loss")
-plt.title("V3 Training vs Validation Loss")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-plt.savefig(history_plot_path, dpi=200)
-plt.show()
+# ======================================================
+# Print Information
+# ======================================================
 
-print("\n========================================")
-print("EPOCH ANALYSIS")
-print("========================================")
-actual_epochs = len(history["epoch"])
+print("=" * 60)
 
-print(f"Actual Epochs Trained   : {actual_epochs}")
-print(f"Best Epoch              : {best_epoch}")
-print(f"Best Validation Loss    : {best_val_loss:.4f}")
-print(f"Epoch history CSV       : {history_csv_path}")
-print(f"Epoch analysis graph    : {history_plot_path}")
-
-if actual_epochs < MAX_EPOCHS:
-    print(
-        "Conclusion: training stopped automatically after "
-        f"{actual_epochs} epochs."
-    )
-    print(
-        f"Use epoch {best_epoch} as the selected training checkpoint "
-        "because it achieved the minimum validation CTC loss."
-    )
+if IS_COLAB:
+    print("Running on Google Colab")
+elif IS_KAGGLE:
+    print("Running on Kaggle")
 else:
-    print(
-        "Conclusion: the model was still improving enough to reach "
-        f"the safety ceiling of {MAX_EPOCHS} epochs."
-    )
-    print(
-        "The required epoch count is not yet established; "
-        "increase the safety ceiling and repeat the experiment."
-    )
+    print("Running on Local Machine")
 
-print("========================================")
+print("Device  :", DEVICE)
 
+if torch.cuda.is_available():
+    print("GPU     :", torch.cuda.get_device_name(0))
 
-# ======================================================
-# Save Final Model
-# ======================================================
+print("Project :", PROJECT_ROOT)
+print("Dataset :", DATASET_DIR)
+print("Train images :", TRAIN_IMAGE_DIR)
+print("Train labels :", TRAIN_LABEL_FILE)
+print("Models  :", MODEL_DIR)
 
-torch.save(
-
-    model.state_dict(),
-
-    final_model_path
-)
-
-
-print("\n========================================")
-print("V3 TRAINING COMPLETED")
-print("========================================")
-
-print(
-    f"Checkpoint : "
-    f"{checkpoint_path}"
-)
-
-print(
-    f"Best Model : "
-    f"{best_model_path}"
-)
-
-print(
-    f"Final Model: "
-    f"{final_model_path}"
-)
-
-print(f"Actual Epochs Trained: {actual_epochs}")
-print(f"Best Epoch (minimum validation loss): {best_epoch}")
-print(f"Best Validation Loss: {best_val_loss:.4f}")
-print(f"Epoch history CSV: {history_csv_path}")
-print(f"Epoch analysis graph: {history_plot_path}")
-print(f"Checkpoint directory: {CHECKPOINT_DIR}")
-print(f"Best model: {best_model_path}")
-
-if actual_epochs < MAX_EPOCHS:
-    print(f"Conclusion: training stopped automatically after {actual_epochs} epochs.")
-    print(f"Selected epoch for the report: {best_epoch}")
-else:
-    print(f"Conclusion: the safety ceiling of {MAX_EPOCHS} epochs was reached.")
-    print("Increase MAX_EPOCHS and repeat the epoch study before claiming convergence.")
-
-print("========================================")
+print("=" * 60)
