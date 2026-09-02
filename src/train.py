@@ -550,15 +550,39 @@ final_model_path = (
 
 
 # ======================================================
-# Epoch-study output files, checkpoints and history
+# Epoch-study output files
 # ======================================================
-history_csv_path = MODEL_DIR / "v3_epoch_history.csv"
-history_plot_path = MODEL_DIR / "v3_epoch_analysis.png"
+# In Google Colab, save checkpoints directly to Google Drive.
+# This means a Colab runtime reset does NOT delete the checkpoint.
+# In Kaggle/local runs, use /kaggle/working or MODEL_DIR.
+# ======================================================
 
-# Keep the epoch experiment separate from the normal V3 model files.
-checkpoint_path = MODEL_DIR / "checkpoint_v3_epoch_study.pth"
-best_model_path = MODEL_DIR / "best_model_v3_epoch_study.pth"
-final_model_path = MODEL_DIR / "math_recognizer_v3_epoch_study.pth"
+COLAB_DRIVE_ROOT = Path(
+    "/content/drive/MyDrive/HandwrittenMathVerifier"
+)
+
+if COLAB_DRIVE_ROOT.exists():
+    EPOCH_STUDY_DIR = COLAB_DRIVE_ROOT / "epoch_study"
+    print("\nStorage mode: GOOGLE DRIVE")
+else:
+    if Path("/kaggle/working").exists():
+        EPOCH_STUDY_DIR = Path("/kaggle/working/HandwrittenMathVerifier/epoch_study")
+    else:
+        EPOCH_STUDY_DIR = MODEL_DIR / "epoch_study"
+    print("\nStorage mode: LOCAL/KAGGLE")
+
+CHECKPOINT_DIR = EPOCH_STUDY_DIR / "checkpoints"
+EPOCH_STUDY_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+history_csv_path = EPOCH_STUDY_DIR / "v3_epoch_history.csv"
+history_plot_path = EPOCH_STUDY_DIR / "v3_epoch_analysis.png"
+
+# Rolling checkpoint for automatic resume.
+checkpoint_path = CHECKPOINT_DIR / "latest_checkpoint.pth"
+
+best_model_path = EPOCH_STUDY_DIR / "best_model_v3_epoch_study.pth"
+final_model_path = EPOCH_STUDY_DIR / "math_recognizer_v3_epoch_study.pth"
 
 history = {
     "epoch": [],
@@ -852,9 +876,10 @@ def validate():
 # ======================================================
 # Epoch-study start / resume logic
 # ======================================================
-# RESET_EPOCH_STUDY = False: resume from the latest checkpoint.
+# RESET_EPOCH_STUDY = False -> resume automatically.
 # If latest_checkpoint.pth is missing, the highest numbered
-# checkpoint_epoch_XXX.pth is used automatically.
+# checkpoint_epoch_XXX.pth is selected.
+# ======================================================
 
 start_epoch = 0
 best_val_loss = float("inf")
@@ -864,24 +889,76 @@ resume_checkpoint = None
 
 if RESET_EPOCH_STUDY:
     print("\nEpoch-study mode: STARTING FROM SCRATCH")
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
 else:
+    # Prefer the rolling checkpoint.
     if checkpoint_path.exists():
-        print("\nEpoch-study checkpoint found. Resuming...")
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint.get("epoch", -1) + 1
-        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
-        history = checkpoint.get("history", history)
-        print(f"Resume epoch: {start_epoch + 1}")
-        print(f"Best validation loss: {best_val_loss:.4f}")
+        resume_checkpoint = checkpoint_path
     else:
-        print("\nNo epoch-study checkpoint found. Starting from scratch.")
+        epoch_checkpoints = list(
+            CHECKPOINT_DIR.glob("checkpoint_epoch_*.pth")
+        )
 
+        if epoch_checkpoints:
+            def epoch_number(path):
+                try:
+                    return int(path.stem.split("_")[-1])
+                except ValueError:
+                    return -1
+
+            epoch_checkpoints.sort(key=epoch_number)
+            resume_checkpoint = epoch_checkpoints[-1]
+
+if RESET_EPOCH_STUDY:
+    print("\n========================================")
+    print("EPOCH STUDY: STARTING FROM SCRATCH")
+    print("========================================")
+
+elif resume_checkpoint is not None:
+    print("\n========================================")
+    print("RESUMING EPOCH STUDY")
+    print("========================================")
+    print(f"Checkpoint: {resume_checkpoint}")
+
+    checkpoint = torch.load(
+        resume_checkpoint,
+        map_location=DEVICE,
+        weights_only=False
+    )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    if "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    completed_epoch_index = int(
+        checkpoint.get("epoch", -1)
+    )
+    start_epoch = completed_epoch_index + 1
+
+    best_val_loss = float(
+        checkpoint.get("best_val_loss", float("inf"))
+    )
+    best_epoch = int(checkpoint.get("best_epoch", 0))
+    no_improvement_epochs = int(
+        checkpoint.get("no_improvement_epochs", 0)
+    )
+
+    saved_history = checkpoint.get("history")
+    if saved_history is not None:
+        history = saved_history
+
+    print(f"Last completed epoch : {completed_epoch_index + 1}")
+    print(f"Next epoch           : {start_epoch + 1}")
+    print(f"Best epoch so far    : {best_epoch}")
+    print(f"Best validation loss : {best_val_loss:.4f}")
+    print(f"No-improvement count : {no_improvement_epochs}")
+    print("========================================\n")
+else:
+    print("\n========================================")
+    print("NO EPOCH-STUDY CHECKPOINT FOUND")
+    print("Starting from epoch 1.")
+    print("========================================\n")
 
 # ======================================================
 # Training
