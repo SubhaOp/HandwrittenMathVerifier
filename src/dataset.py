@@ -45,19 +45,33 @@ class HMEDataset(Dataset):
 
     def encode_label(self, text):
 
+        # ----------------------------------------------
+        # CHANGED: token-level encoding.
+        #
+        # train_labels.txt stores labels as whitespace-
+        # separated symbols (e.g. "1 0 \times ( x + 5 )"),
+        # so splitting on whitespace keeps multi-character
+        # commands (\frac, \times, \angle, \sqrt, ...) as
+        # single atomic symbols instead of shredding them
+        # into individual characters. Must match the
+        # token-level char2idx.json from build_vocab.py.
+        # ----------------------------------------------
+
+        tokens = str(text).split()
+
         encoded = []
 
-        for ch in str(text):
+        for tok in tokens:
 
-            if ch not in self.char2idx:
+            if tok not in self.char2idx:
 
                 raise ValueError(
-                    f"Character {repr(ch)} "
+                    f"Symbol {repr(tok)} "
                     f"not found in vocabulary."
                 )
 
             encoded.append(
-                self.char2idx[ch]
+                self.char2idx[tok]
             )
 
         return torch.tensor(
