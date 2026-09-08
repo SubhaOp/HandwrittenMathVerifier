@@ -620,79 +620,124 @@ elif resume_checkpoint is not None:
         weights_only=False
     )
 
-    model.load_state_dict(
-        checkpoint["model_state_dict"]
-    )
+    # CHANGED: wrapped in try/except.
+    #
+    # If char2idx.json was rebuilt with a different
+    # vocabulary (different num_classes) since this
+    # checkpoint was saved, model.load_state_dict() raises
+    # a RuntimeError (classifier layer shape mismatch)
+    # instead of resuming. Falling back to a fresh run here
+    # instead of crashing -- the old checkpoint is left on
+    # disk untouched.
 
-    optimizer.load_state_dict(
-        checkpoint["optimizer_state_dict"]
-    )
+    try:
 
-    if "scheduler_state_dict" in checkpoint:
-        scheduler.load_state_dict(
-            checkpoint["scheduler_state_dict"]
+        model.load_state_dict(
+            checkpoint["model_state_dict"]
         )
 
-    completed_epoch_index = int(
-        checkpoint.get("epoch", -1)
-    )
-
-    start_epoch = completed_epoch_index + 1
-
-    best_val_loss = float(
-        checkpoint.get(
-            "best_val_loss",
-            float("inf")
+        optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
         )
-    )
 
-    best_epoch = int(
-        checkpoint.get(
-            "best_epoch",
-            0
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(
+                checkpoint["scheduler_state_dict"]
+            )
+
+        completed_epoch_index = int(
+            checkpoint.get("epoch", -1)
         )
-    )
 
-    no_improvement_epochs = int(
-        checkpoint.get(
-            "no_improvement_epochs",
-            0
+        start_epoch = completed_epoch_index + 1
+
+        best_val_loss = float(
+            checkpoint.get(
+                "best_val_loss",
+                float("inf")
+            )
         )
-    )
 
-    saved_history = checkpoint.get(
-        "history"
-    )
+        best_epoch = int(
+            checkpoint.get(
+                "best_epoch",
+                0
+            )
+        )
 
-    if saved_history is not None:
-        history = saved_history
+        no_improvement_epochs = int(
+            checkpoint.get(
+                "no_improvement_epochs",
+                0
+            )
+        )
 
-    print(
-        f"Last completed epoch : "
-        f"{completed_epoch_index + 1}"
-    )
+        saved_history = checkpoint.get(
+            "history"
+        )
 
-    print(
-        f"Next epoch           : "
-        f"{start_epoch + 1}"
-    )
+        if saved_history is not None:
+            history = saved_history
 
-    print(
-        f"Best epoch so far    : "
-        f"{best_epoch}"
-    )
+        print(
+            f"Last completed epoch : "
+            f"{completed_epoch_index + 1}"
+        )
 
-    print(
-        f"Best validation loss : "
-        f"{best_val_loss:.4f}"
-    )
+        print(
+            f"Next epoch           : "
+            f"{start_epoch + 1}"
+        )
 
-    print(
-        f"No-improvement count : "
-        f"{no_improvement_epochs}"
-    )
+        print(
+            f"Best epoch so far    : "
+            f"{best_epoch}"
+        )
 
-    print("=" * 60)
+        print(
+            f"Best validation loss : "
+            f"{best_val_loss:.4f}"
+        )
+
+        print(
+            f"No-improvement count : "
+            f"{no_improvement_epochs}"
+        )
+
+        print("=" * 60)
+
+    except RuntimeError as e:
+
+        print("\n" + "=" * 60)
+        print("CHECKPOINT INCOMPATIBLE -- STARTING FRESH")
+        print("=" * 60)
+        print(
+            "Could not load the saved checkpoint into the "
+            "current model/optimizer -- this almost always "
+            "means num_classes changed (e.g. char2idx.json "
+            "was rebuilt with a new vocabulary) since this "
+            "checkpoint was saved."
+        )
+        print(f"Error: {e}")
+        print(
+            "Starting a new epoch study from epoch 1 instead. "
+            "The old checkpoint has NOT been deleted -- it's "
+            "still at:"
+        )
+        print(f"  {resume_checkpoint}")
+        print("=" * 60)
+
+        start_epoch = 0
+        best_val_loss = float("inf")
+        best_epoch = 0
+        no_improvement_epochs = 0
+
+        history = {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+            "learning_rate": [],
+        }
 
 else:
 
