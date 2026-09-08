@@ -17,8 +17,10 @@ from src.config import (
 # ======================================================
 
 # Start with 1000 to verify everything.
-# Set to None later for all 24,607 test images.
-MAX_SAMPLES = 1000
+# CHANGED: None = full test set (24,607 images), for a final
+# accuracy number instead of a quick check. Greedy decoding
+# only, at ~0.41 sec/image that's roughly 2.5-3 hours on a T4.
+MAX_SAMPLES = None
 
 
 # ======================================================
