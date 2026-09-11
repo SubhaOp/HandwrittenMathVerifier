@@ -1163,7 +1163,8 @@ if __name__ == "__main__":
 
     print(
         "========================================"
-    )import json
+    )
+import json
 import math
 
 import cv2
