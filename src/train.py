@@ -1,41 +1,36 @@
 """
-V3 Epoch Study Training
-Handwritten Mathematical Expression Recognition
+FINAL V3 TRAINING — 16 EPOCHS, FULL VALID HME100K TRAINING SET
 
-Pipeline:
+Architecture:
     HME100K
-      -> preprocessing
+      -> existing V3 preprocessing
       -> ResNet18
       -> 384-step sequence
       -> 2-layer BiLSTM
       -> Linear
       -> CTC
 
-Features:
-- Google Colab + Google Drive checkpoint storage
-- Automatic resume after Colab/runtime interruption
-- Checkpoint after every completed epoch
-- Permanent checkpoint for every epoch
-- Best validation-loss model
-- CSV history
-- Training/validation loss graph
-- Early stopping
-- 100-epoch safety ceiling
-
 IMPORTANT:
-    src/config.py contains configuration/path settings.
-    This file must be src/train.py.
+- Uses the existing 245-class vocabulary (244 tokens + CTC blank).
+- Uses ALL CTC-valid HME100K training samples.
+- Does NOT create a validation split.
+- Trains for EXACTLY 16 completed epochs.
+- Keeps V3 architecture, preprocessing, batch size, AdamW, LR,
+  weight decay, CTC loss, and gradient clipping unchanged.
+- ReduceLROnPlateau is not stepped because there is no validation set
+  in this final full-data experiment; LR therefore remains exactly 1e-4.
+- Saves checkpoints and the final model to Google Drive.
+- Can resume after a Colab runtime interruption.
 """
 
 import csv
 import random
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from src.config import *
@@ -44,25 +39,22 @@ from src.model import MathRecognizer
 
 
 # ======================================================
-# V3 Epoch Study Configuration
+# FINAL TRAINING CONFIGURATION
 # ======================================================
 
-VALIDATION_RATIO = 0.10
+FINAL_EPOCHS = 16
 RANDOM_SEED = 42
-
-# 100 is ONLY a safety ceiling.
-# Early stopping determines the actual required epoch count.
-MAX_EPOCHS = 100
-EPOCHS = MAX_EPOCHS
-
-# False = resume from Google Drive checkpoint if present.
-# True  = intentionally start a brand-new epoch study.
-RESET_EPOCH_STUDY = False
-
-EARLY_STOPPING_PATIENCE = 8
-
-# V3 model is expected to produce 384 CTC time steps.
 CTC_TIME_STEPS = 384
+
+# Keep these identical to the V3 epoch-study configuration.
+BATCH_SIZE_FINAL = BATCH_SIZE          # 32
+LEARNING_RATE_FINAL = LEARNING_RATE    # 1e-4
+WEIGHT_DECAY_FINAL = 1e-4
+GRAD_CLIP_MAX_NORM = 5.0
+
+# False = resume if a final-training checkpoint exists.
+# True  = intentionally start this final experiment from scratch.
+RESET_FINAL_TRAINING = False
 
 
 # ======================================================
@@ -82,19 +74,44 @@ except Exception:
 
 
 # ======================================================
+# Google Drive storage
+# ======================================================
+
+DRIVE_ROOT = Path("/content/drive/MyDrive/HandwrittenMathVerifier")
+
+if DRIVE_ROOT.exists():
+    FINAL_DIR = DRIVE_ROOT / "final_training_16_epoch"
+    print("\nStorage mode : GOOGLE DRIVE")
+else:
+    FINAL_DIR = MODEL_DIR / "final_training_16_epoch"
+    print("\nStorage mode : LOCAL/FALLBACK")
+
+CHECKPOINT_DIR = FINAL_DIR / "checkpoints"
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+LATEST_CHECKPOINT = CHECKPOINT_DIR / "latest_checkpoint.pth"
+FINAL_MODEL_PATH = FINAL_DIR / "math_recognizer_v3_final_epoch16.pth"
+FINAL_HISTORY_CSV = FINAL_DIR / "v3_final_training_history.csv"
+
+
+# ======================================================
 # Device
 # ======================================================
 
-print("\n" + "=" * 60)
-print("V3 EPOCH STUDY")
-print("=" * 60)
+print("\n" + "=" * 70)
+print("V3 FINAL TRAINING — 16 EPOCHS / FULL VALID TRAINING SET")
+print("=" * 70)
 print("Device :", DEVICE)
 
 if torch.cuda.is_available():
     print("GPU    :", torch.cuda.get_device_name(0))
-    print("VRAM   :", f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    print(
+        "VRAM   :",
+        f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB"
+    )
 
-print("=" * 60)
+print("=" * 70)
 
 
 # ======================================================
@@ -121,10 +138,8 @@ def collate_fn(batch):
 # ======================================================
 
 def get_target_lengths(labels):
-    """
-    Padding and CTC blank ID are both 0.
-    Actual characters use non-zero IDs.
-    """
+    # 0 is CTC blank and also the padding value.
+    # All real vocabulary tokens have non-zero IDs.
     return torch.tensor(
         [
             torch.count_nonzero(label).item()
@@ -136,38 +151,31 @@ def get_target_lengths(labels):
 
 
 # ======================================================
-# Checkpoint helper
+# Atomic checkpoint save
 # ======================================================
 
 def atomic_torch_save(obj, path):
-    """
-    Save to a temporary file first, then replace the target.
-
-    This reduces the chance of leaving a partially written
-    checkpoint if the runtime is interrupted during saving.
-    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     temp_path = path.with_suffix(path.suffix + ".tmp")
-
     torch.save(obj, temp_path)
     temp_path.replace(path)
 
 
 # ======================================================
-# Dataset
+# Load full training dataset
 # ======================================================
 
-print("\nLoading Dataset...")
+print("\nLoading HME100K training dataset...")
 
 dataset = HMEDataset()
 
-print(f"Original Dataset Samples : {len(dataset)}")
+print(f"Original training samples : {len(dataset)}")
 
 
 # ======================================================
-# CTC Validity Filtering
+# CTC validity filtering
 # ======================================================
 
 print("\nChecking CTC validity...")
@@ -186,9 +194,7 @@ for idx in tqdm(
 
     if target_length > 1:
         repeats = int(
-            (
-                label[1:] == label[:-1]
-            ).sum().item()
+            (label[1:] == label[:-1]).sum().item()
         )
     else:
         repeats = 0
@@ -200,63 +206,35 @@ for idx in tqdm(
     else:
         invalid_indices.append(idx)
 
-print("\n" + "=" * 60)
-print("V3 CTC Dataset Filtering")
-print("=" * 60)
-print(f"Original Samples : {len(dataset)}")
-print(f"Valid Samples    : {len(valid_indices)}")
-print(f"Filtered Samples : {len(invalid_indices)}")
-print("=" * 60)
+print("\n" + "=" * 70)
+print("FINAL TRAINING DATASET")
+print("=" * 70)
+print(f"Original samples : {len(dataset)}")
+print(f"Valid samples    : {len(valid_indices)}")
+print(f"Filtered samples : {len(invalid_indices)}")
+print("Validation split : NONE")
+print("=" * 70)
+
+if len(valid_indices) == 0:
+    raise RuntimeError("No valid training samples were found.")
 
 
 # ======================================================
-# Train / Validation Split
+# Full-data loader
 # ======================================================
 
-generator = torch.Generator()
-generator.manual_seed(RANDOM_SEED)
+# IMPORTANT:
+# Unlike the epoch study, there is NO 90/10 train-validation split.
+# Every CTC-valid sample is used for training.
 
-permutation = torch.randperm(
-    len(valid_indices),
-    generator=generator
-).tolist()
-
-validation_size = max(
-    1,
-    int(len(valid_indices) * VALIDATION_RATIO)
+train_dataset = torch.utils.data.Subset(
+    dataset,
+    valid_indices
 )
-
-val_positions = permutation[:validation_size]
-train_positions = permutation[validation_size:]
-
-train_indices = [
-    valid_indices[i]
-    for i in train_positions
-]
-
-val_indices = [
-    valid_indices[i]
-    for i in val_positions
-]
-
-train_dataset = Subset(dataset, train_indices)
-val_dataset = Subset(dataset, val_indices)
-
-print("\n" + "=" * 60)
-print("V3 Dataset Split")
-print("=" * 60)
-print(f"Training Samples   : {len(train_dataset)}")
-print(f"Validation Samples : {len(val_dataset)}")
-print("=" * 60)
-
-
-# ======================================================
-# DataLoaders
-# ======================================================
 
 train_loader = DataLoader(
     train_dataset,
-    batch_size=BATCH_SIZE,
+    batch_size=BATCH_SIZE_FINAL,
     shuffle=True,
     num_workers=NUM_WORKERS,
     pin_memory=torch.cuda.is_available(),
@@ -264,15 +242,9 @@ train_loader = DataLoader(
     persistent_workers=(NUM_WORKERS > 0)
 )
 
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    num_workers=NUM_WORKERS,
-    pin_memory=torch.cuda.is_available(),
-    collate_fn=collate_fn,
-    persistent_workers=(NUM_WORKERS > 0)
-)
+print(f"\nTraining samples actually used : {len(train_dataset)}")
+print(f"Batch size                     : {BATCH_SIZE_FINAL}")
+print(f"Batches per epoch              : {len(train_loader)}")
 
 
 # ======================================================
@@ -281,10 +253,21 @@ val_loader = DataLoader(
 
 num_classes = len(dataset.char2idx) + 1
 
-model = MathRecognizer(num_classes).to(DEVICE)
+print("\n" + "=" * 70)
+print("MODEL")
+print("=" * 70)
+print(f"Vocabulary tokens : {len(dataset.char2idx)}")
+print(f"Output classes    : {num_classes}")
+print("Expected          : 245 (244 vocabulary tokens + CTC blank)")
+print("=" * 70)
 
-print("\nModel Created Successfully")
-print(f"Number of Classes : {num_classes}")
+if num_classes != 245:
+    raise RuntimeError(
+        f"Expected 245 output classes for the corrected vocabulary, "
+        f"but found {num_classes}. Check char2idx.json."
+    )
+
+model = MathRecognizer(num_classes).to(DEVICE)
 
 
 # ======================================================
@@ -304,17 +287,16 @@ with torch.no_grad():
 
     test_output = model(test_input)
 
-print(f"Input Shape  : {tuple(test_input.shape)}")
-print(f"Output Shape : {tuple(test_output.shape)}")
+print(f"Input shape  : {tuple(test_input.shape)}")
+print(f"Output shape : {tuple(test_output.shape)}")
 
 if test_output.shape[1] != CTC_TIME_STEPS:
     raise RuntimeError(
-        "V3 sequence length mismatch! "
-        f"Expected {CTC_TIME_STEPS}, "
+        f"V3 sequence length mismatch: expected {CTC_TIME_STEPS}, "
         f"got {test_output.shape[1]}"
     )
 
-print("V3 sequence length verified.")
+print("V3 sequence length verified: 384")
 
 del test_input
 del test_output
@@ -324,7 +306,7 @@ if torch.cuda.is_available():
 
 
 # ======================================================
-# Loss / Optimizer / Scheduler
+# Loss / Optimizer
 # ======================================================
 
 criterion = nn.CTCLoss(
@@ -334,90 +316,24 @@ criterion = nn.CTCLoss(
 
 optimizer = torch.optim.AdamW(
     model.parameters(),
-    lr=LEARNING_RATE,
-    weight_decay=1e-4
-)
-
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    mode="min",
-    factor=0.5,
-    patience=2,
-    min_lr=1e-6
+    lr=LEARNING_RATE_FINAL,
+    weight_decay=WEIGHT_DECAY_FINAL
 )
 
 
 # ======================================================
-# Google Drive Epoch-Study Storage
-# ======================================================
-
-DRIVE_ROOT = Path(
-    "/content/drive/MyDrive/HandwrittenMathVerifier"
-)
-
-if DRIVE_ROOT.exists():
-    EPOCH_STUDY_DIR = DRIVE_ROOT / "epoch_study"
-    print("\nStorage mode : GOOGLE DRIVE")
-else:
-    # This fallback keeps the script usable locally/Kaggle.
-    if Path("/kaggle/working").exists():
-        EPOCH_STUDY_DIR = (
-            Path("/kaggle/working")
-            / "HandwrittenMathVerifier"
-            / "epoch_study"
-        )
-        print("\nStorage mode : KAGGLE")
-    else:
-        EPOCH_STUDY_DIR = MODEL_DIR / "epoch_study"
-        print("\nStorage mode : LOCAL")
-
-CHECKPOINT_DIR = EPOCH_STUDY_DIR / "checkpoints"
-
-EPOCH_STUDY_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-CHECKPOINT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-LATEST_CHECKPOINT = (
-    CHECKPOINT_DIR / "latest_checkpoint.pth"
-)
-
-HISTORY_CSV = (
-    EPOCH_STUDY_DIR / "v3_epoch_history.csv"
-)
-
-HISTORY_PLOT = (
-    EPOCH_STUDY_DIR / "v3_epoch_analysis.png"
-)
-
-BEST_MODEL_PATH = (
-    EPOCH_STUDY_DIR / "best_model_v3_epoch_study.pth"
-)
-
-FINAL_MODEL_PATH = (
-    EPOCH_STUDY_DIR / "math_recognizer_v3_epoch_study.pth"
-)
-
-
-# ======================================================
-# History
+# Training history
 # ======================================================
 
 history = {
     "epoch": [],
     "train_loss": [],
-    "val_loss": [],
-    "learning_rate": [],
+    "learning_rate": []
 }
 
 
 # ======================================================
-# Training
+# Train one epoch
 # ======================================================
 
 def train_one_epoch():
@@ -443,9 +359,7 @@ def train_one_epoch():
             non_blocking=True
         )
 
-        optimizer.zero_grad(
-            set_to_none=True
-        )
+        optimizer.zero_grad(set_to_none=True)
 
         outputs = model(images)
 
@@ -479,7 +393,7 @@ def train_one_epoch():
 
         torch.nn.utils.clip_grad_norm_(
             model.parameters(),
-            max_norm=5.0
+            max_norm=GRAD_CLIP_MAX_NORM
         )
 
         optimizer.step()
@@ -495,660 +409,173 @@ def train_one_epoch():
 
 
 # ======================================================
-# Validation
-# ======================================================
-
-@torch.no_grad()
-def validate():
-    model.eval()
-
-    total_loss = 0.0
-
-    progress_bar = tqdm(
-        val_loader,
-        desc="Validation",
-        leave=True
-    )
-
-    for images, labels in progress_bar:
-
-        images = images.to(
-            DEVICE,
-            non_blocking=True
-        )
-
-        labels = labels.to(
-            DEVICE,
-            non_blocking=True
-        )
-
-        outputs = model(images)
-
-        outputs = outputs.log_softmax(dim=2)
-
-        outputs = outputs.permute(1, 0, 2)
-
-        input_lengths = torch.full(
-            (images.size(0),),
-            outputs.size(0),
-            dtype=torch.long,
-            device=DEVICE
-        )
-
-        target_lengths = get_target_lengths(labels)
-
-        loss = criterion(
-            outputs,
-            labels,
-            input_lengths,
-            target_lengths
-        )
-
-        if not torch.isfinite(loss):
-            raise RuntimeError(
-                f"Non-finite validation CTC loss: {loss.item()}"
-            )
-
-        total_loss += loss.item()
-
-        progress_bar.set_postfix(
-            val_loss=f"{loss.item():.4f}"
-        )
-
-    return total_loss / len(val_loader)
-
-
-# ======================================================
-# Resume Logic
+# Resume logic
 # ======================================================
 
 start_epoch = 0
-best_val_loss = float("inf")
-best_epoch = 0
-no_improvement_epochs = 0
-resume_checkpoint = None
 
-if not RESET_EPOCH_STUDY:
+if RESET_FINAL_TRAINING:
+    print("\nStarting FINAL 16-EPOCH training from scratch.")
 
-    if LATEST_CHECKPOINT.exists():
-        resume_checkpoint = LATEST_CHECKPOINT
+elif LATEST_CHECKPOINT.exists():
 
-    else:
-        epoch_checkpoints = list(
-            CHECKPOINT_DIR.glob(
-                "checkpoint_epoch_*.pth"
-            )
-        )
-
-        if epoch_checkpoints:
-
-            def get_epoch_number(path):
-                try:
-                    return int(
-                        path.stem.split("_")[-1]
-                    )
-                except ValueError:
-                    return -1
-
-            epoch_checkpoints.sort(
-                key=get_epoch_number
-            )
-
-            resume_checkpoint = (
-                epoch_checkpoints[-1]
-            )
-
-
-if RESET_EPOCH_STUDY:
-
-    print("\n" + "=" * 60)
-    print("EPOCH STUDY: STARTING FROM SCRATCH")
-    print("=" * 60)
-
-elif resume_checkpoint is not None:
-
-    print("\n" + "=" * 60)
-    print("RESUMING EPOCH STUDY")
-    print("=" * 60)
-    print(
-        f"Checkpoint : {resume_checkpoint}"
-    )
+    print("\n" + "=" * 70)
+    print("RESUMING FINAL TRAINING")
+    print("=" * 70)
+    print(f"Checkpoint : {LATEST_CHECKPOINT}")
 
     checkpoint = torch.load(
-        resume_checkpoint,
+        LATEST_CHECKPOINT,
         map_location=DEVICE,
         weights_only=False
     )
 
-    # CHANGED: wrapped in try/except.
-    #
-    # If char2idx.json was rebuilt with a different
-    # vocabulary (different num_classes) since this
-    # checkpoint was saved, model.load_state_dict() raises
-    # a RuntimeError (classifier layer shape mismatch)
-    # instead of resuming. Falling back to a fresh run here
-    # instead of crashing -- the old checkpoint is left on
-    # disk untouched.
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
 
-    try:
+    optimizer.load_state_dict(
+        checkpoint["optimizer_state_dict"]
+    )
 
-        model.load_state_dict(
-            checkpoint["model_state_dict"]
-        )
+    completed_epoch_index = int(
+        checkpoint.get("epoch", -1)
+    )
 
-        optimizer.load_state_dict(
-            checkpoint["optimizer_state_dict"]
-        )
+    start_epoch = completed_epoch_index + 1
 
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(
-                checkpoint["scheduler_state_dict"]
-            )
+    saved_history = checkpoint.get("history")
 
-        completed_epoch_index = int(
-            checkpoint.get("epoch", -1)
-        )
+    if saved_history is not None:
+        history = saved_history
 
-        start_epoch = completed_epoch_index + 1
-
-        best_val_loss = float(
-            checkpoint.get(
-                "best_val_loss",
-                float("inf")
-            )
-        )
-
-        best_epoch = int(
-            checkpoint.get(
-                "best_epoch",
-                0
-            )
-        )
-
-        no_improvement_epochs = int(
-            checkpoint.get(
-                "no_improvement_epochs",
-                0
-            )
-        )
-
-        saved_history = checkpoint.get(
-            "history"
-        )
-
-        if saved_history is not None:
-            history = saved_history
-
-        print(
-            f"Last completed epoch : "
-            f"{completed_epoch_index + 1}"
-        )
-
-        print(
-            f"Next epoch           : "
-            f"{start_epoch + 1}"
-        )
-
-        print(
-            f"Best epoch so far    : "
-            f"{best_epoch}"
-        )
-
-        print(
-            f"Best validation loss : "
-            f"{best_val_loss:.4f}"
-        )
-
-        print(
-            f"No-improvement count : "
-            f"{no_improvement_epochs}"
-        )
-
-        print("=" * 60)
-
-    except RuntimeError as e:
-
-        print("\n" + "=" * 60)
-        print("CHECKPOINT INCOMPATIBLE -- STARTING FRESH")
-        print("=" * 60)
-        print(
-            "Could not load the saved checkpoint into the "
-            "current model/optimizer -- this almost always "
-            "means num_classes changed (e.g. char2idx.json "
-            "was rebuilt with a new vocabulary) since this "
-            "checkpoint was saved."
-        )
-        print(f"Error: {e}")
-        print(
-            "Starting a new epoch study from epoch 1 instead. "
-            "The old checkpoint has NOT been deleted -- it's "
-            "still at:"
-        )
-        print(f"  {resume_checkpoint}")
-        print("=" * 60)
-
-        start_epoch = 0
-        best_val_loss = float("inf")
-        best_epoch = 0
-        no_improvement_epochs = 0
-
-        history = {
-            "epoch": [],
-            "train_loss": [],
-            "val_loss": [],
-            "learning_rate": [],
-        }
+    print(
+        f"Last completed epoch : {completed_epoch_index + 1}"
+    )
+    print(
+        f"Next epoch           : {start_epoch + 1}"
+    )
+    print("=" * 70)
 
 else:
-
-    print("\n" + "=" * 60)
-    print("NO EPOCH-STUDY CHECKPOINT FOUND")
+    print("\nNo final-training checkpoint found.")
     print("Starting from epoch 1.")
-    print("=" * 60)
 
 
-# ======================================================
-# Training Loop
-# ======================================================
+if start_epoch >= FINAL_EPOCHS:
+    print("\nAll 16 epochs are already completed.")
+else:
 
-print("\n" + "=" * 60)
-print("V3 EPOCH STUDY TRAINING STARTED")
-print("=" * 60)
-print("Preprocessing : Aspect-ratio preserving + padding")
-print(f"CTC steps     : {CTC_TIME_STEPS}")
-print("Validation    : 10%")
-print("Best model    : Lowest validation CTC loss")
-print(f"Maximum epochs: {MAX_EPOCHS}")
-print(
-    "Actual epoch count will be determined "
-    "by validation-loss convergence."
-)
-print(
-    f"Early stopping patience: "
-    f"{EARLY_STOPPING_PATIENCE}"
-)
-print(
-    f"Checkpoint directory: {CHECKPOINT_DIR}"
-)
-print("=" * 60 + "\n")
+    # ==================================================
+    # EXACTLY 16 EPOCHS
+    # ==================================================
 
+    print("\n" + "=" * 70)
+    print("FINAL TRAINING STARTED")
+    print("=" * 70)
+    print("Architecture       : V3 ResNet18 + 2-layer BiLSTM + Linear + CTC")
+    print("Vocabulary          : 245 classes including CTC blank")
+    print("CTC time steps      : 384")
+    print("Training samples    :", len(train_dataset))
+    print("Validation split    : NONE")
+    print("Batch size          :", BATCH_SIZE_FINAL)
+    print("Learning rate       :", LEARNING_RATE_FINAL)
+    print("Optimizer           : AdamW")
+    print("Weight decay        :", WEIGHT_DECAY_FINAL)
+    print("Gradient clip       :", GRAD_CLIP_MAX_NORM)
+    print("Total epochs        :", FINAL_EPOCHS)
+    print("LR schedule         : Fixed 1e-4 (no validation available)")
+    print("Checkpoint directory:", CHECKPOINT_DIR)
+    print("=" * 70 + "\n")
 
-for epoch in range(
-    start_epoch,
-    MAX_EPOCHS
-):
+    for epoch in range(start_epoch, FINAL_EPOCHS):
 
-    print("\n" + "=" * 60)
-    print(
-        f"V3 Epoch {epoch + 1}/{MAX_EPOCHS}"
-    )
-    print("=" * 60)
+        print("\n" + "=" * 70)
+        print(f"FINAL V3 EPOCH {epoch + 1}/{FINAL_EPOCHS}")
+        print("=" * 70)
 
-    train_loss = train_one_epoch()
+        train_loss = train_one_epoch()
 
-    val_loss = validate()
+        current_lr = optimizer.param_groups[0]["lr"]
 
-    scheduler.step(val_loss)
+        print("\n" + "-" * 60)
+        print(f"Epoch         : {epoch + 1}/{FINAL_EPOCHS}")
+        print(f"Training Loss : {train_loss:.6f}")
+        print(f"Learning Rate : {current_lr:.8f}")
+        print("-" * 60)
 
-    current_lr = (
-        optimizer.param_groups[0]["lr"]
-    )
+        history["epoch"].append(epoch + 1)
+        history["train_loss"].append(float(train_loss))
+        history["learning_rate"].append(float(current_lr))
 
-    print("\n" + "-" * 50)
-    print(
-        f"Epoch           : "
-        f"{epoch + 1}/{MAX_EPOCHS}"
-    )
-    print(
-        f"Training Loss   : "
-        f"{train_loss:.4f}"
-    )
-    print(
-        f"Validation Loss : "
-        f"{val_loss:.4f}"
-    )
-    print(
-        f"Learning Rate   : "
-        f"{current_lr:.8f}"
-    )
-    print("-" * 50)
+        checkpoint_data = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "train_loss": float(train_loss),
+            "ctc_time_steps": CTC_TIME_STEPS,
+            "num_classes": num_classes,
+            "vocabulary_size": len(dataset.char2idx),
+            "training_samples": len(train_dataset),
+            "history": history,
+            "config": {
+                "epochs": FINAL_EPOCHS,
+                "batch_size": BATCH_SIZE_FINAL,
+                "learning_rate": LEARNING_RATE_FINAL,
+                "weight_decay": WEIGHT_DECAY_FINAL,
+                "gradient_clip": GRAD_CLIP_MAX_NORM,
+                "random_seed": RANDOM_SEED,
+                "validation_ratio": 0.0,
+            }
+        }
 
-    history["epoch"].append(
-        epoch + 1
-    )
+        # Rolling checkpoint for Colab interruption recovery.
+        atomic_torch_save(
+            checkpoint_data,
+            LATEST_CHECKPOINT
+        )
 
-    history["train_loss"].append(
-        float(train_loss)
-    )
-
-    history["val_loss"].append(
-        float(val_loss)
-    )
-
-    history["learning_rate"].append(
-        float(current_lr)
-    )
-
-    # --------------------------------------------------
-    # Best model
-    # --------------------------------------------------
-
-    if val_loss < best_val_loss:
-
-        best_val_loss = float(val_loss)
-        best_epoch = epoch + 1
-        no_improvement_epochs = 0
+        # Permanent checkpoint for this exact epoch.
+        epoch_checkpoint_path = (
+            CHECKPOINT_DIR /
+            f"checkpoint_epoch_{epoch + 1:03d}.pth"
+        )
 
         atomic_torch_save(
-            model.state_dict(),
-            BEST_MODEL_PATH
+            checkpoint_data,
+            epoch_checkpoint_path
         )
 
-        print("✓ BEST V3 MODEL UPDATED")
-        print(
-            f"Best Validation Loss: "
-            f"{best_val_loss:.4f}"
-        )
-        print(
-            f"Best Epoch: {best_epoch}"
-        )
+        # Save CSV after every epoch.
+        with open(
+            FINAL_HISTORY_CSV,
+            "w",
+            newline="",
+            encoding="utf-8"
+        ) as f:
 
-    else:
-
-        no_improvement_epochs += 1
-
-        print(
-            "No validation improvement for "
-            f"{no_improvement_epochs}/"
-            f"{EARLY_STOPPING_PATIENCE} epoch(s)."
-        )
-
-    # --------------------------------------------------
-    # Full checkpoint
-    # --------------------------------------------------
-
-    checkpoint_data = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "train_loss": float(train_loss),
-        "val_loss": float(val_loss),
-        "best_val_loss": float(best_val_loss),
-        "best_epoch": int(best_epoch),
-        "no_improvement_epochs": int(
-            no_improvement_epochs
-        ),
-        "ctc_time_steps": CTC_TIME_STEPS,
-        "history": history,
-        "config": {
-            "batch_size": BATCH_SIZE,
-            "learning_rate": LEARNING_RATE,
-            "validation_ratio": VALIDATION_RATIO,
-            "random_seed": RANDOM_SEED,
-            "max_epochs": MAX_EPOCHS,
-            "early_stopping_patience":
-                EARLY_STOPPING_PATIENCE,
-        }
-    }
-
-    # Rolling checkpoint for automatic resume.
-    atomic_torch_save(
-        checkpoint_data,
-        LATEST_CHECKPOINT
-    )
-
-    # Permanent checkpoint for this exact epoch.
-    epoch_checkpoint_path = (
-        CHECKPOINT_DIR
-        / f"checkpoint_epoch_{epoch + 1:03d}.pth"
-    )
-
-    atomic_torch_save(
-        checkpoint_data,
-        epoch_checkpoint_path
-    )
-
-    print(
-        f"✓ Checkpoint saved: "
-        f"{epoch_checkpoint_path}"
-    )
-
-    # --------------------------------------------------
-    # Save history
-    # --------------------------------------------------
-
-    with open(
-        HISTORY_CSV,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as f:
-
-        writer = csv.writer(f)
-
-        writer.writerow([
-            "epoch",
-            "train_loss",
-            "validation_loss",
-            "learning_rate"
-        ])
-
-        for i in range(
-            len(history["epoch"])
-        ):
+            writer = csv.writer(f)
 
             writer.writerow([
-                history["epoch"][i],
-                history["train_loss"][i],
-                history["val_loss"][i],
-                history["learning_rate"][i]
+                "epoch",
+                "train_loss",
+                "learning_rate"
             ])
 
-    # --------------------------------------------------
-    # Early stopping
-    # --------------------------------------------------
+            for i in range(len(history["epoch"])):
+                writer.writerow([
+                    history["epoch"][i],
+                    history["train_loss"][i],
+                    history["learning_rate"][i]
+                ])
 
-    if (
-        no_improvement_epochs
-        >= EARLY_STOPPING_PATIENCE
-    ):
-
-        print("\n" + "=" * 60)
-        print("EARLY STOPPING TRIGGERED")
         print(
-            "Validation loss did not improve for "
-            f"{EARLY_STOPPING_PATIENCE} "
-            "consecutive epochs."
+            f"✓ Checkpoint saved: {epoch_checkpoint_path}"
         )
-        print("=" * 60)
-
-        break
 
 
 # ======================================================
-# Final History Save
-# ======================================================
-
-with open(
-    HISTORY_CSV,
-    "w",
-    newline="",
-    encoding="utf-8"
-) as f:
-
-    writer = csv.writer(f)
-
-    writer.writerow([
-        "epoch",
-        "train_loss",
-        "validation_loss",
-        "learning_rate"
-    ])
-
-    for i in range(
-        len(history["epoch"])
-    ):
-
-        writer.writerow([
-            history["epoch"][i],
-            history["train_loss"][i],
-            history["val_loss"][i],
-            history["learning_rate"][i]
-        ])
-
-
-# ======================================================
-# Plot
-# ======================================================
-
-plt.figure(figsize=(10, 6))
-
-plt.plot(
-    history["epoch"],
-    history["train_loss"],
-    marker="o",
-    label="Training Loss"
-)
-
-plt.plot(
-    history["epoch"],
-    history["val_loss"],
-    marker="o",
-    label="Validation Loss"
-)
-
-if history["val_loss"]:
-
-    best_idx = min(
-        range(len(history["val_loss"])),
-        key=lambda i: history["val_loss"][i]
-    )
-
-    plot_best_epoch = (
-        history["epoch"][best_idx]
-    )
-
-    plot_best_loss = (
-        history["val_loss"][best_idx]
-    )
-
-    plt.axvline(
-        plot_best_epoch,
-        linestyle="--",
-        label=(
-            f"Best Epoch = "
-            f"{plot_best_epoch}"
-        )
-    )
-
-    plt.scatter(
-        [plot_best_epoch],
-        [plot_best_loss],
-        s=80,
-        label=(
-            f"Best Val Loss = "
-            f"{plot_best_loss:.4f}"
-        )
-    )
-
-plt.xlabel("Epoch")
-plt.ylabel("CTC Loss")
-plt.title("V3 Training vs Validation Loss")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(
-    HISTORY_PLOT,
-    dpi=200
-)
-
-plt.show()
-
-
-# ======================================================
-# Epoch Analysis
-# ======================================================
-
-actual_epochs = len(
-    history["epoch"]
-)
-
-if history["val_loss"]:
-
-    best_idx = min(
-        range(len(history["val_loss"])),
-        key=lambda i: history["val_loss"][i]
-    )
-
-    best_epoch = history["epoch"][best_idx]
-    best_val_loss = history["val_loss"][best_idx]
-
-print("\n" + "=" * 60)
-print("EPOCH ANALYSIS")
-print("=" * 60)
-
-print(
-    f"Actual Epochs Trained   : "
-    f"{actual_epochs}"
-)
-
-print(
-    f"Best Epoch              : "
-    f"{best_epoch}"
-)
-
-print(
-    f"Best Validation Loss    : "
-    f"{best_val_loss:.4f}"
-)
-
-print(
-    f"Epoch history CSV       : "
-    f"{HISTORY_CSV}"
-)
-
-print(
-    f"Epoch analysis graph    : "
-    f"{HISTORY_PLOT}"
-)
-
-if actual_epochs < MAX_EPOCHS:
-
-    print(
-        "Conclusion: training stopped "
-        "automatically after "
-        f"{actual_epochs} epochs."
-    )
-
-    print(
-        f"Use epoch {best_epoch} as the "
-        "selected training checkpoint "
-        "because it achieved the minimum "
-        "validation CTC loss."
-    )
-
-else:
-
-    print(
-        "Conclusion: the model reached "
-        f"the {MAX_EPOCHS}-epoch safety ceiling."
-    )
-
-    print(
-        "The required epoch count is not "
-        "yet established. Increase the "
-        "safety ceiling and repeat the "
-        "epoch study if validation loss "
-        "is still improving."
-    )
-
-print("=" * 60)
-
-
-# ======================================================
-# Final Model
+# Save final model
 # ======================================================
 
 atomic_torch_save(
@@ -1156,53 +583,25 @@ atomic_torch_save(
     FINAL_MODEL_PATH
 )
 
-print("\n" + "=" * 60)
-print("V3 EPOCH STUDY COMPLETED")
-print("=" * 60)
+print("\n" + "=" * 70)
+print("FINAL V3 TRAINING COMPLETED")
+print("=" * 70)
+print(f"Epochs completed : {len(history['epoch'])}")
+print(f"Final model      : {FINAL_MODEL_PATH}")
+print(f"Latest checkpoint: {LATEST_CHECKPOINT}")
+print(f"History CSV      : {FINAL_HISTORY_CSV}")
+print(f"Checkpoint dir   : {CHECKPOINT_DIR}")
 
-print(
-    f"Latest checkpoint : "
-    f"{LATEST_CHECKPOINT}"
-)
+if history["train_loss"]:
+    print(
+        f"Epoch 1 loss     : {history['train_loss'][0]:.6f}"
+    )
+    print(
+        f"Epoch 16 loss    : {history['train_loss'][-1]:.6f}"
+    )
 
-print(
-    f"Best model        : "
-    f"{BEST_MODEL_PATH}"
-)
+print("=" * 70)
 
-print(
-    f"Final model       : "
-    f"{FINAL_MODEL_PATH}"
-)
-
-print(
-    f"Actual epochs     : "
-    f"{actual_epochs}"
-)
-
-print(
-    f"Best epoch        : "
-    f"{best_epoch}"
-)
-
-print(
-    f"Best val loss     : "
-    f"{best_val_loss:.4f}"
-)
-
-print(
-    f"History CSV       : "
-    f"{HISTORY_CSV}"
-)
-
-print(
-    f"Loss graph        : "
-    f"{HISTORY_PLOT}"
-)
-
-print(
-    f"Checkpoints       : "
-    f"{CHECKPOINT_DIR}"
-)
-
-print("=" * 60)
+print("\nIMPORTANT:")
+print("Now evaluate ONLY this final model on the independent HME100K test set.")
+print("Do not use the training/epoch-study validation set as the test set.")
