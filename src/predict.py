@@ -12,7 +12,11 @@ from src.model import MathRecognizer
 # V3 Configuration
 # ======================================================
 
-MODEL_FILENAME = "best_model_v3.pth"
+# Final 16-epoch model trained on the full valid HME100K training set.
+FINAL_MODEL_PATH = Path(
+    "/content/drive/MyDrive/HandwrittenMathVerifier/"
+    "final_training_16_epoch/math_recognizer_v3_final_epoch16.pth"
+)
 
 DEFAULT_BEAM_WIDTH = 10
 
@@ -55,10 +59,8 @@ model = MathRecognizer(
 )
 
 
-model_path = (
-    MODEL_DIR /
-    MODEL_FILENAME
-)
+# IMPORTANT: use the final 16-epoch model, not the older saved_models model.
+model_path = FINAL_MODEL_PATH
 
 
 if not model_path.exists():
@@ -68,8 +70,8 @@ if not model_path.exists():
         f"\nV3 model not found:\n"
         f"{model_path}\n\n"
 
-        f"Train V3 first and make sure "
-        f"best_model_v3.pth exists."
+        f"Make sure the final 16-epoch model exists at:\n"
+        f"{FINAL_MODEL_PATH}"
     )
 
 
@@ -1178,7 +1180,11 @@ from src.model import MathRecognizer
 # V3 Configuration
 # ======================================================
 
-MODEL_FILENAME = "best_model_v3.pth"
+# Final 16-epoch model trained on the full valid HME100K training set.
+FINAL_MODEL_PATH = Path(
+    "/content/drive/MyDrive/HandwrittenMathVerifier/"
+    "final_training_16_epoch/math_recognizer_v3_final_epoch16.pth"
+)
 
 DEFAULT_BEAM_WIDTH = 10
 
@@ -1221,10 +1227,8 @@ model = MathRecognizer(
 )
 
 
-model_path = (
-    MODEL_DIR /
-    MODEL_FILENAME
-)
+# IMPORTANT: use the final 16-epoch model, not the older saved_models model.
+model_path = FINAL_MODEL_PATH
 
 
 if not model_path.exists():
@@ -1234,8 +1238,8 @@ if not model_path.exists():
         f"\nV3 model not found:\n"
         f"{model_path}\n\n"
 
-        f"Train V3 first and make sure "
-        f"best_model_v3.pth exists."
+        f"Make sure the final 16-epoch model exists at:\n"
+        f"{FINAL_MODEL_PATH}"
     )
 
 
