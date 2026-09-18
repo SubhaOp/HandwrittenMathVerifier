@@ -6,20 +6,31 @@ HME100K Dataset Cleaning and Leakage Control
 
 Purpose:
 1. Preserve the original HME100K dataset.
-2. Detect invalid/missing image-label records.
+2. Audit missing/malformed image-label records.
 3. Detect corrupted images.
 4. Detect duplicate images within train/test.
-5. Detect exact image overlap between train and test.
-6. Remove exact duplicate samples from a CLEANED copy.
-7. Preserve token-level mathematical labels.
-8. Generate detailed audit logs.
-9. Generate before-vs-after statistics.
+5. Detect exact image-content overlap between train and test.
+6. Distinguish unique overlap groups from overlap pairings.
+7. Detect label conflicts in exact image overlaps.
+8. Create a separate cleaned dataset.
+9. Preserve token-level mathematical labels.
+10. Generate detailed audit logs.
+11. Generate before-vs-after statistics.
 
 IMPORTANT:
 - Original HME100K is NEVER modified.
 - Test labels are NEVER used to build vocabulary.
-- Mathematical-expression overlap is NOT treated as image leakage.
+- Same mathematical expression in different handwritten images
+  is NOT treated as image leakage.
+- Exact image-content overlap between train and test is treated
+  as a data-separation problem.
+- Exact-overlap label conflicts are NOT silently cleaned.
+  They are reported and cleaning is blocked until reviewed.
 """
+
+# ============================================================
+# Imports
+# ============================================================
 
 import csv
 import hashlib
@@ -29,7 +40,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
-import pandas as pd
 
 from src.config import (
     DATASET_DIR,
@@ -44,45 +54,113 @@ from src.config import (
 # Configuration
 # ============================================================
 
-CLEANED_DATASET_DIR = DATASET_DIR.parent / "HME100K_CLEANED"
+# Original dataset:
+#
+#     /content/HME100K
+#
+# Cleaned dataset:
+#
+#     /content/HME100K_CLEANED
+#
+# The original dataset is NEVER modified.
+
+CLEANED_DATASET_DIR = (
+    DATASET_DIR.parent / "HME100K_CLEANED"
+)
+
 
 CLEANED_TRAIN_DIR = (
-    CLEANED_DATASET_DIR / "train" / "train_images"
+    CLEANED_DATASET_DIR
+    / "train"
+    / "train_images"
 )
+
 
 CLEANED_TEST_DIR = (
-    CLEANED_DATASET_DIR / "test" / "test_images"
+    CLEANED_DATASET_DIR
+    / "test"
+    / "test_images"
 )
+
 
 CLEANED_TRAIN_LABEL_FILE = (
-    CLEANED_DATASET_DIR / "train" / "train_labels.txt"
+    CLEANED_DATASET_DIR
+    / "train"
+    / "train_labels.txt"
 )
+
 
 CLEANED_TEST_LABEL_FILE = (
-    CLEANED_DATASET_DIR / "test" / "test_labels.txt"
+    CLEANED_DATASET_DIR
+    / "test"
+    / "test_labels.txt"
 )
-
-AUDIT_DIR = CLEANED_DATASET_DIR / "audit"
-
-REMOVAL_LOG = AUDIT_DIR / "removal_log.csv"
-CONFLICT_LOG = AUDIT_DIR / "label_conflicts.csv"
-DUPLICATE_LOG = AUDIT_DIR / "duplicate_groups.csv"
-CROSS_SPLIT_LOG = AUDIT_DIR / "train_test_overlap.csv"
-SUMMARY_JSON = AUDIT_DIR / "cleaning_summary.json"
-SUMMARY_TXT = AUDIT_DIR / "cleaning_summary.txt"
 
 
 # ============================================================
-# Utility functions
+# Audit output directory
+# ============================================================
+
+AUDIT_DIR = (
+    CLEANED_DATASET_DIR / "audit"
+)
+
+
+REMOVAL_LOG = (
+    AUDIT_DIR / "removal_log.csv"
+)
+
+
+CONFLICT_LOG = (
+    AUDIT_DIR / "label_conflicts.csv"
+)
+
+
+DUPLICATE_LOG = (
+    AUDIT_DIR / "duplicate_groups.csv"
+)
+
+
+CROSS_SPLIT_LOG = (
+    AUDIT_DIR / "train_test_overlap.csv"
+)
+
+
+SUMMARY_JSON = (
+    AUDIT_DIR / "cleaning_summary.json"
+)
+
+
+SUMMARY_TXT = (
+    AUDIT_DIR / "cleaning_summary.txt"
+)
+
+
+MALFORMED_LOG = (
+    AUDIT_DIR / "malformed_records.csv"
+)
+
+
+MISSING_LOG = (
+    AUDIT_DIR / "missing_records.csv"
+)
+
+
+# ============================================================
+# Utility Functions
 # ============================================================
 
 def image_hash(image_path):
     """
-    Calculate SHA-256 hash of the actual decoded image pixels.
+    Calculate SHA-256 hash of decoded image content.
 
-    Using decoded pixels rather than only the raw file bytes
-    allows detection of identical images saved using different
-    file encodings or metadata.
+    The hash includes:
+        - image shape
+        - image dtype
+        - decoded pixel bytes
+
+    This allows identical image content to be detected even
+    if file metadata or encoding differs.
     """
 
     image = cv2.imread(
@@ -93,11 +171,10 @@ def image_hash(image_path):
     if image is None:
         return None
 
-    # Include shape and dtype so different image structures
-    # do not accidentally produce equivalent byte streams.
     metadata = (
         str(image.shape).encode("utf-8")
-        + str(image.dtype).encode("utf-8")
+        +
+        str(image.dtype).encode("utf-8")
     )
 
     return hashlib.sha256(
@@ -105,24 +182,26 @@ def image_hash(image_path):
     ).hexdigest()
 
 
+# ============================================================
+# Read Label File
+# ============================================================
+
 def read_label_file(label_file):
     """
-    Read HME100K label file.
+    Read an HME100K label file.
 
     Expected format:
 
         image_filename<TAB>token token token ...
 
-    Returns:
-        records = [
-            {
-                "image": filename,
-                "label": label,
-                "line_number": line number
-            }
-        ]
+    Example:
 
-    Also records malformed lines separately.
+        000001.png    1 0 \times ( x + 5 )
+
+    Returns:
+
+        records
+        malformed records
     """
 
     records = []
@@ -134,19 +213,37 @@ def read_label_file(label_file):
         encoding="utf-8"
     ) as f:
 
-        for line_number, raw_line in enumerate(f, start=1):
+        for line_number, raw_line in enumerate(
+            f,
+            start=1
+        ):
 
-            line = raw_line.rstrip("\n\r")
+            line = raw_line.rstrip(
+                "\n\r"
+            )
+
+            # ------------------------------------------------
+            # Empty line
+            # ------------------------------------------------
 
             if not line.strip():
+
                 malformed.append({
                     "line_number": line_number,
                     "reason": "empty_line",
                     "content": line
                 })
+
                 continue
 
-            parts = line.split("\t", maxsplit=1)
+            # ------------------------------------------------
+            # Image + label separation
+            # ------------------------------------------------
+
+            parts = line.split(
+                "\t",
+                maxsplit=1
+            )
 
             if len(parts) != 2:
 
@@ -155,10 +252,15 @@ def read_label_file(label_file):
                     "reason": "missing_tab_separator",
                     "content": line
                 })
+
                 continue
 
             image_name = parts[0].strip()
             label = parts[1].strip()
+
+            # ------------------------------------------------
+            # Empty image name
+            # ------------------------------------------------
 
             if not image_name:
 
@@ -167,7 +269,12 @@ def read_label_file(label_file):
                     "reason": "empty_image_name",
                     "content": line
                 })
+
                 continue
+
+            # ------------------------------------------------
+            # Empty label
+            # ------------------------------------------------
 
             if not label:
 
@@ -176,9 +283,13 @@ def read_label_file(label_file):
                     "reason": "empty_label",
                     "content": line
                 })
+
                 continue
 
-            # Verify that token-level representation exists.
+            # ------------------------------------------------
+            # Token validation
+            # ------------------------------------------------
+
             tokens = label.split()
 
             if len(tokens) == 0:
@@ -188,7 +299,12 @@ def read_label_file(label_file):
                     "reason": "zero_tokens",
                     "content": line
                 })
+
                 continue
+
+            # ------------------------------------------------
+            # Valid record
+            # ------------------------------------------------
 
             records.append({
                 "image": image_name,
@@ -199,11 +315,14 @@ def read_label_file(label_file):
     return records, malformed
 
 
+# ============================================================
+# Get Image Files
+# ============================================================
+
 def get_image_files(image_dir):
     """
-    Return image files recursively.
-
-    Supported extensions are common image formats used by HME100K.
+    Return all supported image files directly inside the
+    specified image directory.
     """
 
     extensions = {
@@ -217,16 +336,24 @@ def get_image_files(image_dir):
     }
 
     return {
-        p.name: p
-        for p in image_dir.iterdir()
-        if p.is_file()
-        and p.suffix.lower() in extensions
+        path.name: path
+        for path in image_dir.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in extensions
     }
 
 
-def write_csv(path, rows, fieldnames):
+# ============================================================
+# CSV Writer
+# ============================================================
+
+def write_csv(
+    path,
+    rows,
+    fieldnames
+):
     """
-    Write rows to CSV.
+    Write rows to a CSV file.
     """
 
     path.parent.mkdir(
@@ -252,9 +379,16 @@ def write_csv(path, rows, fieldnames):
             writer.writerow(row)
 
 
-def safe_copy(source, destination):
+# ============================================================
+# Safe Image Copy
+# ============================================================
+
+def safe_copy(
+    source,
+    destination
+):
     """
-    Copy one image while preserving metadata where possible.
+    Copy image without modifying the original.
     """
 
     destination.parent.mkdir(
@@ -269,7 +403,7 @@ def safe_copy(source, destination):
 
 
 # ============================================================
-# Audit one partition
+# Audit One Partition
 # ============================================================
 
 def audit_partition(
@@ -279,15 +413,31 @@ def audit_partition(
 ):
 
     print("\n" + "=" * 70)
-    print(f"AUDITING {partition_name.upper()} DATA")
-    print("=" * 70)
 
-    records, malformed = read_label_file(
-        label_file
+    print(
+        f"AUDITING {partition_name.upper()} DATA"
     )
 
-    image_files = get_image_files(
-        image_dir
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # Read labels
+    # --------------------------------------------------------
+
+    records, malformed = (
+        read_label_file(
+            label_file
+        )
+    )
+
+    # --------------------------------------------------------
+    # Read images
+    # --------------------------------------------------------
+
+    image_files = (
+        get_image_files(
+            image_dir
+        )
     )
 
     label_names = {
@@ -300,12 +450,16 @@ def audit_partition(
     )
 
     # --------------------------------------------------------
-    # Missing records
+    # Missing image records
     # --------------------------------------------------------
 
     missing_images = sorted(
         label_names - image_names
     )
+
+    # --------------------------------------------------------
+    # Images without labels
+    # --------------------------------------------------------
 
     images_without_labels = sorted(
         image_names - label_names
@@ -325,12 +479,13 @@ def audit_partition(
 
     duplicate_label_filenames = {
         name: rows
-        for name, rows in filename_counts.items()
+        for name, rows
+        in filename_counts.items()
         if len(rows) > 1
     }
 
     # --------------------------------------------------------
-    # Image validation + hash
+    # Image validation
     # --------------------------------------------------------
 
     corrupted_images = []
@@ -350,6 +505,10 @@ def audit_partition(
             cv2.IMREAD_UNCHANGED
         )
 
+        # ----------------------------------------------------
+        # Corrupted/unreadable image
+        # ----------------------------------------------------
+
         if image is None:
 
             corrupted_images.append(
@@ -358,14 +517,22 @@ def audit_partition(
 
             continue
 
+        # ----------------------------------------------------
         # Dimensions
-        height, width = image.shape[:2]
+        # ----------------------------------------------------
+
+        height, width = (
+            image.shape[:2]
+        )
 
         dimensions[
             f"{width}x{height}"
         ] += 1
 
-        # Mode/channel information
+        # ----------------------------------------------------
+        # Image mode/channels
+        # ----------------------------------------------------
+
         if len(image.shape) == 2:
 
             modes["L"] += 1
@@ -384,12 +551,18 @@ def audit_partition(
                 f"{image.shape[2]} channels"
             ] += 1
 
+        # ----------------------------------------------------
         # File format
+        # ----------------------------------------------------
+
         formats[
             path.suffix.lower()
         ] += 1
 
-        # Hash
+        # ----------------------------------------------------
+        # Image hash
+        # ----------------------------------------------------
+
         h = image_hash(path)
 
         if h is not None:
@@ -409,25 +582,50 @@ def audit_partition(
         )
 
     duplicate_groups = {
-        h: files
-        for h, files in hash_groups.items()
+        h: sorted(files)
+        for h, files
+        in hash_groups.items()
         if len(files) > 1
     }
 
+    # --------------------------------------------------------
+    # Duplicate statistics
+    # --------------------------------------------------------
+
+    duplicate_images_involved = sum(
+        len(files)
+        for files
+        in duplicate_groups.values()
+    )
+
+    redundant_duplicate_images = sum(
+        len(files) - 1
+        for files
+        in duplicate_groups.values()
+    )
+
+    # --------------------------------------------------------
+    # Print audit
+    # --------------------------------------------------------
+
     print(
-        f"Label records          : {len(records)}"
+        f"Label records          : "
+        f"{len(records)}"
     )
 
     print(
-        f"Image files            : {len(image_files)}"
+        f"Image files            : "
+        f"{len(image_files)}"
     )
 
     print(
-        f"Malformed records      : {len(malformed)}"
+        f"Malformed records      : "
+        f"{len(malformed)}"
     )
 
     print(
-        f"Missing images         : {len(missing_images)}"
+        f"Missing images         : "
+        f"{len(missing_images)}"
     )
 
     print(
@@ -450,50 +648,140 @@ def audit_partition(
         f"{len(duplicate_groups)}"
     )
 
+    print(
+        f"Duplicate images involved : "
+        f"{duplicate_images_involved}"
+    )
+
+    print(
+        f"Redundant duplicate images : "
+        f"{redundant_duplicate_images}"
+    )
+
     return {
-        "partition": partition_name,
-        "records": records,
-        "malformed": malformed,
-        "image_files": image_files,
-        "missing_images": missing_images,
-        "images_without_labels": images_without_labels,
-        "corrupted_images": corrupted_images,
-        "duplicate_label_filenames": duplicate_label_filenames,
-        "hashes": hashes,
-        "duplicate_groups": duplicate_groups,
-        "dimensions": dict(dimensions),
-        "modes": dict(modes),
-        "formats": dict(formats),
+
+        "partition":
+            partition_name,
+
+        "records":
+            records,
+
+        "malformed":
+            malformed,
+
+        "image_files":
+            image_files,
+
+        "missing_images":
+            missing_images,
+
+        "images_without_labels":
+            images_without_labels,
+
+        "corrupted_images":
+            corrupted_images,
+
+        "duplicate_label_filenames":
+            duplicate_label_filenames,
+
+        "hashes":
+            hashes,
+
+        "duplicate_groups":
+            duplicate_groups,
+
+        "duplicate_images_involved":
+            duplicate_images_involved,
+
+        "redundant_duplicate_images":
+            redundant_duplicate_images,
+
+        "dimensions":
+            dict(dimensions),
+
+        "modes":
+            dict(modes),
+
+        "formats":
+            dict(formats),
     }
 
 
 # ============================================================
-# Cross-partition exact image overlap
+# Find Exact Train-Test Overlap
 # ============================================================
 
 def find_cross_split_overlaps(
     train_audit,
     test_audit
 ):
+    """
+    Detect exact image-content overlap.
+
+    IMPORTANT:
+
+    A single image-content hash may correspond to:
+
+        Train:
+            image_A
+            image_B
+
+        Test:
+            image_C
+            image_D
+
+    This represents:
+
+        1 unique overlap group/hash
+
+    but:
+
+        2 train images
+        2 test images
+        4 possible pairings
+
+    Therefore these quantities are reported separately.
+    """
 
     print("\n" + "=" * 70)
-    print("TRAIN-TEST EXACT IMAGE OVERLAP")
+
+    print(
+        "TRAIN-TEST EXACT IMAGE OVERLAP"
+    )
+
     print("=" * 70)
 
     train_hash_to_files = defaultdict(list)
+
     test_hash_to_files = defaultdict(list)
 
-    for filename, h in train_audit["hashes"].items():
+    # --------------------------------------------------------
+    # Train hash groups
+    # --------------------------------------------------------
+
+    for filename, h in (
+        train_audit["hashes"].items()
+    ):
 
         train_hash_to_files[h].append(
             filename
         )
 
-    for filename, h in test_audit["hashes"].items():
+    # --------------------------------------------------------
+    # Test hash groups
+    # --------------------------------------------------------
+
+    for filename, h in (
+        test_audit["hashes"].items()
+    ):
 
         test_hash_to_files[h].append(
             filename
         )
+
+    # --------------------------------------------------------
+    # Common hashes
+    # --------------------------------------------------------
 
     common_hashes = sorted(
         set(train_hash_to_files)
@@ -501,33 +789,118 @@ def find_cross_split_overlaps(
         set(test_hash_to_files)
     )
 
-    overlaps = []
+    overlap_groups = []
+
+    # --------------------------------------------------------
+    # Build unique overlap groups
+    # --------------------------------------------------------
 
     for h in common_hashes:
 
-        for train_file in train_hash_to_files[h]:
+        train_files = sorted(
+            train_hash_to_files[h]
+        )
 
-            for test_file in test_hash_to_files[h]:
+        test_files = sorted(
+            test_hash_to_files[h]
+        )
 
-                overlaps.append({
-                    "hash": h,
-                    "train_image": train_file,
-                    "test_image": test_file
-                })
+        pair_count = (
+            len(train_files)
+            *
+            len(test_files)
+        )
 
-    print(
-        f"Exact train-test image overlaps: "
-        f"{len(overlaps)}"
+        overlap_groups.append({
+
+            "hash":
+                h,
+
+            "train_images":
+                train_files,
+
+            "test_images":
+                test_files,
+
+            "train_count":
+                len(train_files),
+
+            "test_count":
+                len(test_files),
+
+            "pair_count":
+                pair_count,
+        })
+
+    # --------------------------------------------------------
+    # Unique image counts
+    # --------------------------------------------------------
+
+    unique_train_images = {
+        filename
+        for group
+        in overlap_groups
+        for filename
+        in group["train_images"]
+    }
+
+    unique_test_images = {
+        filename
+        for group
+        in overlap_groups
+        for filename
+        in group["test_images"]
+    }
+
+    # --------------------------------------------------------
+    # Pair count
+    # --------------------------------------------------------
+
+    total_pairings = sum(
+        group["pair_count"]
+        for group
+        in overlap_groups
     )
 
-    return overlaps
+    # --------------------------------------------------------
+    # Print
+    # --------------------------------------------------------
+
+    print(
+        f"Unique overlapping hashes       : "
+        f"{len(overlap_groups)}"
+    )
+
+    print(
+        f"Unique training images involved  : "
+        f"{len(unique_train_images)}"
+    )
+
+    print(
+        f"Unique testing images involved   : "
+        f"{len(unique_test_images)}"
+    )
+
+    print(
+        f"Total train-test overlap pairs   : "
+        f"{total_pairings}"
+    )
+
+    return overlap_groups
 
 
 # ============================================================
-# Compare labels
+# Build Label Map
 # ============================================================
 
 def build_label_map(records):
+    """
+    Build:
+
+        image filename
+            ->
+        list of associated labels
+    """
 
     result = defaultdict(list)
 
@@ -542,65 +915,115 @@ def build_label_map(records):
     return result
 
 
+# ============================================================
+# Analyse Overlap Labels
+# ============================================================
+
 def analyse_overlap_labels(
     overlaps,
     train_records,
     test_records
 ):
+    """
+    Determine whether exact-overlap groups have different labels.
 
-    train_labels = build_label_map(
-        train_records
+    Comparison is performed at the UNIQUE HASH/GROUP level.
+
+    This prevents duplicate train/test pairings from inflating
+    the conflict count.
+    """
+
+    train_labels = (
+        build_label_map(
+            train_records
+        )
     )
 
-    test_labels = build_label_map(
-        test_records
+    test_labels = (
+        build_label_map(
+            test_records
+        )
     )
 
     conflicts = []
 
-    for overlap in overlaps:
+    for group in overlaps:
 
-        train_file = overlap[
-            "train_image"
-        ]
-
-        test_file = overlap[
-            "test_image"
-        ]
-
-        train_set = set(
-            train_labels.get(
-                train_file,
+        train_label_values = sorted({
+            label
+            for filename
+            in group["train_images"]
+            for label
+            in train_labels.get(
+                filename,
                 []
             )
-        )
+        })
 
-        test_set = set(
-            test_labels.get(
-                test_file,
+        test_label_values = sorted({
+            label
+            for filename
+            in group["test_images"]
+            for label
+            in test_labels.get(
+                filename,
                 []
             )
-        )
+        })
 
-        if train_set != test_set:
+        # ----------------------------------------------------
+        # Label conflict
+        # ----------------------------------------------------
+
+        if (
+            set(train_label_values)
+            !=
+            set(test_label_values)
+        ):
 
             conflicts.append({
-                "hash": overlap["hash"],
-                "train_image": train_file,
-                "test_image": test_file,
-                "train_labels": " || ".join(
-                    train_set
-                ),
-                "test_labels": " || ".join(
-                    test_set
-                )
+
+                "hash":
+                    group["hash"],
+
+                "train_images":
+                    " || ".join(
+                        group["train_images"]
+                    ),
+
+                "test_images":
+                    " || ".join(
+                        group["test_images"]
+                    ),
+
+                "train_labels":
+                    " || ".join(
+                        train_label_values
+                    ),
+
+                "test_labels":
+                    " || ".join(
+                        test_label_values
+                    ),
+
+                "train_count":
+                    group["train_count"],
+
+                "test_count":
+                    group["test_count"],
             })
+
+    print(
+        f"Unique overlap groups with "
+        f"label conflicts: "
+        f"{len(conflicts)}"
+    )
 
     return conflicts
 
 
 # ============================================================
-# Cleaning decision
+# Build Cleaning Plan
 # ============================================================
 
 def build_removal_plan(
@@ -608,67 +1031,149 @@ def build_removal_plan(
     test_audit,
     cross_overlaps
 ):
+    """
+    Build a removal plan.
+
+    Rules:
+
+    1. Missing images:
+       Remove corresponding invalid records.
+
+    2. Corrupted images:
+       Remove.
+
+    3. Internal exact duplicates:
+       Retain first sorted filename.
+       Remove redundant copies.
+
+    4. Exact train-test image overlap:
+       Retain TEST copy.
+       Remove TRAIN copies.
+
+    NOTE:
+       Label conflicts are NOT silently resolved here.
+       The main program blocks cleaning when conflicts exist.
+    """
 
     removals = []
 
-    # --------------------------------------------------------
-    # 1. Remove invalid train records
-    # --------------------------------------------------------
+    # ========================================================
+    # TRAIN INVALID RECORDS
+    # ========================================================
 
-    for filename in train_audit[
-        "missing_images"
-    ]:
-
-        removals.append({
-            "partition": "train",
-            "image": filename,
-            "reason": "missing_image"
-        })
-
-    for filename in train_audit[
-        "corrupted_images"
-    ]:
+    for filename in (
+        train_audit["missing_images"]
+    ):
 
         removals.append({
-            "partition": "train",
-            "image": filename,
-            "reason": "corrupted_image"
+
+            "partition":
+                "train",
+
+            "image":
+                filename,
+
+            "reason":
+                "missing_image",
+
+            "duplicate_of":
+                "",
+
+            "test_duplicate":
+                "",
+
+            "hash":
+                "",
         })
 
-    # --------------------------------------------------------
-    # 2. Remove invalid test records
-    # --------------------------------------------------------
-
-    for filename in test_audit[
-        "missing_images"
-    ]:
+    for filename in (
+        train_audit["corrupted_images"]
+    ):
 
         removals.append({
-            "partition": "test",
-            "image": filename,
-            "reason": "missing_image"
+
+            "partition":
+                "train",
+
+            "image":
+                filename,
+
+            "reason":
+                "corrupted_image",
+
+            "duplicate_of":
+                "",
+
+            "test_duplicate":
+                "",
+
+            "hash":
+                "",
         })
 
-    for filename in test_audit[
-        "corrupted_images"
-    ]:
+    # ========================================================
+    # TEST INVALID RECORDS
+    # ========================================================
+
+    for filename in (
+        test_audit["missing_images"]
+    ):
 
         removals.append({
-            "partition": "test",
-            "image": filename,
-            "reason": "corrupted_image"
+
+            "partition":
+                "test",
+
+            "image":
+                filename,
+
+            "reason":
+                "missing_image",
+
+            "duplicate_of":
+                "",
+
+            "test_duplicate":
+                "",
+
+            "hash":
+                "",
         })
 
-    # --------------------------------------------------------
-    # 3. Internal train duplicate groups
-    #
-    # Retain the first filename.
-    # Remove additional identical images.
-    # --------------------------------------------------------
+    for filename in (
+        test_audit["corrupted_images"]
+    ):
 
-    for h, files in train_audit[
-        "duplicate_groups"
-    ].items():
+        removals.append({
+
+            "partition":
+                "test",
+
+            "image":
+                filename,
+
+            "reason":
+                "corrupted_image",
+
+            "duplicate_of":
+                "",
+
+            "test_duplicate":
+                "",
+
+            "hash":
+                "",
+        })
+
+    # ========================================================
+    # INTERNAL TRAIN DUPLICATES
+    # ========================================================
+
+    for h, files in (
+        train_audit[
+            "duplicate_groups"
+        ].items()
+    ):
 
         files = sorted(files)
 
@@ -677,22 +1182,35 @@ def build_removal_plan(
         for duplicate in files[1:]:
 
             removals.append({
-                "partition": "train",
-                "image": duplicate,
-                "reason": (
-                    "internal_exact_duplicate"
-                ),
-                "duplicate_of": retained,
-                "hash": h
+
+                "partition":
+                    "train",
+
+                "image":
+                    duplicate,
+
+                "reason":
+                    "internal_exact_duplicate",
+
+                "duplicate_of":
+                    retained,
+
+                "test_duplicate":
+                    "",
+
+                "hash":
+                    h,
             })
 
-    # --------------------------------------------------------
-    # 4. Internal test duplicate groups
-    # --------------------------------------------------------
+    # ========================================================
+    # INTERNAL TEST DUPLICATES
+    # ========================================================
 
-    for h, files in test_audit[
-        "duplicate_groups"
-    ].items():
+    for h, files in (
+        test_audit[
+            "duplicate_groups"
+        ].items()
+    ):
 
         files = sorted(files)
 
@@ -701,24 +1219,29 @@ def build_removal_plan(
         for duplicate in files[1:]:
 
             removals.append({
-                "partition": "test",
-                "image": duplicate,
-                "reason": (
-                    "internal_exact_duplicate"
-                ),
-                "duplicate_of": retained,
-                "hash": h
+
+                "partition":
+                    "test",
+
+                "image":
+                    duplicate,
+
+                "reason":
+                    "internal_exact_duplicate",
+
+                "duplicate_of":
+                    retained,
+
+                "test_duplicate":
+                    "",
+
+                "hash":
+                    h,
             })
 
-    # --------------------------------------------------------
-    # 5. Train-test exact image overlap
-    #
-    # Keep TEST copy.
-    # Remove TRAIN copy.
-    #
-    # This prevents the same image from appearing in
-    # both training and testing.
-    # --------------------------------------------------------
+    # ========================================================
+    # TRAIN-TEST EXACT IMAGE OVERLAP
+    # ========================================================
 
     already_removed_train = {
         row["image"]
@@ -726,36 +1249,50 @@ def build_removal_plan(
         if row["partition"] == "train"
     }
 
-    for overlap in cross_overlaps:
+    for group in cross_overlaps:
 
-        train_file = overlap[
-            "train_image"
-        ]
+        for train_file in (
+            group["train_images"]
+        ):
 
-        if train_file in already_removed_train:
-            continue
+            if train_file in (
+                already_removed_train
+            ):
 
-        removals.append({
-            "partition": "train",
-            "image": train_file,
-            "reason": (
-                "exact_train_test_image_overlap"
-            ),
-            "test_duplicate": overlap[
-                "test_image"
-            ],
-            "hash": overlap["hash"]
-        })
+                continue
 
-        already_removed_train.add(
-            train_file
-        )
+            removals.append({
+
+                "partition":
+                    "train",
+
+                "image":
+                    train_file,
+
+                "reason":
+                    "exact_train_test_image_overlap",
+
+                "duplicate_of":
+                    "",
+
+                "test_duplicate":
+                    " || ".join(
+                        group["test_images"]
+                    ),
+
+                "hash":
+                    group["hash"],
+            })
+
+            already_removed_train.add(
+                train_file
+            )
 
     return removals
 
 
 # ============================================================
-# Create cleaned dataset
+# Create Cleaned Dataset
 # ============================================================
 
 def create_cleaned_dataset(
@@ -763,19 +1300,28 @@ def create_cleaned_dataset(
     test_audit,
     removals
 ):
+    """
+    Create a separate cleaned dataset.
+
+    Original HME100K is never modified.
+    """
 
     print("\n" + "=" * 70)
-    print("CREATING CLEANED DATASET")
+
+    print(
+        "CREATING CLEANED DATASET"
+    )
+
     print("=" * 70)
 
     # --------------------------------------------------------
-    # Safety: never delete original data
+    # Existing cleaned directory
     # --------------------------------------------------------
 
     if CLEANED_DATASET_DIR.exists():
 
         print(
-            f"Cleaning output already exists:\n"
+            f"\nCleaning output already exists:\n"
             f"{CLEANED_DATASET_DIR}"
         )
 
@@ -796,6 +1342,10 @@ def create_cleaned_dataset(
             CLEANED_DATASET_DIR
         )
 
+    # --------------------------------------------------------
+    # Create directories
+    # --------------------------------------------------------
+
     CLEANED_TRAIN_DIR.mkdir(
         parents=True,
         exist_ok=True
@@ -812,7 +1362,7 @@ def create_cleaned_dataset(
     )
 
     # --------------------------------------------------------
-    # Build removal sets
+    # Removal sets
     # --------------------------------------------------------
 
     train_remove = {
@@ -828,12 +1378,14 @@ def create_cleaned_dataset(
     }
 
     # --------------------------------------------------------
-    # Copy TRAIN images
+    # Copy training data
     # --------------------------------------------------------
 
     kept_train_records = []
 
-    for record in train_audit["records"]:
+    for record in train_audit[
+        "records"
+    ]:
 
         filename = record["image"]
 
@@ -841,13 +1393,13 @@ def create_cleaned_dataset(
             continue
 
         source = (
-            TRAIN_IMAGE_DIR /
-            filename
+            TRAIN_IMAGE_DIR
+            / filename
         )
 
         destination = (
-            CLEANED_TRAIN_DIR /
-            filename
+            CLEANED_TRAIN_DIR
+            / filename
         )
 
         if source.exists():
@@ -862,12 +1414,14 @@ def create_cleaned_dataset(
             )
 
     # --------------------------------------------------------
-    # Copy TEST images
+    # Copy testing data
     # --------------------------------------------------------
 
     kept_test_records = []
 
-    for record in test_audit["records"]:
+    for record in test_audit[
+        "records"
+    ]:
 
         filename = record["image"]
 
@@ -875,13 +1429,13 @@ def create_cleaned_dataset(
             continue
 
         source = (
-            TEST_IMAGE_DIR /
-            filename
+            TEST_IMAGE_DIR
+            / filename
         )
 
         destination = (
-            CLEANED_TEST_DIR /
-            filename
+            CLEANED_TEST_DIR
+            / filename
         )
 
         if source.exists():
@@ -929,8 +1483,12 @@ def create_cleaned_dataset(
                 f"{record['label']}\n"
             )
 
+    # --------------------------------------------------------
+    # Print results
+    # --------------------------------------------------------
+
     print(
-        f"Cleaned training samples: "
+        f"\nCleaned training samples: "
         f"{len(kept_train_records)}"
     )
 
@@ -943,7 +1501,7 @@ def create_cleaned_dataset(
 
 
 # ============================================================
-# Write audit logs
+# Write Audit Logs
 # ============================================================
 
 def write_logs(
@@ -953,15 +1511,18 @@ def write_logs(
     conflicts,
     removals
 ):
+    """
+    Write all detailed audit information.
+    """
 
     AUDIT_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Removal log
-    # --------------------------------------------------------
+    # ========================================================
 
     removal_fields = [
         "partition",
@@ -978,9 +1539,9 @@ def write_logs(
         removal_fields
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Duplicate group log
-    # --------------------------------------------------------
+    # ========================================================
 
     duplicate_rows = []
 
@@ -989,17 +1550,33 @@ def write_logs(
         ("test", test_audit)
     ]:
 
-        for h, files in audit[
-            "duplicate_groups"
-        ].items():
+        for h, files in (
+            audit[
+                "duplicate_groups"
+            ].items()
+        ):
 
             for filename in sorted(files):
 
                 duplicate_rows.append({
-                    "partition": partition,
-                    "hash": h,
-                    "group_size": len(files),
-                    "image": filename
+
+                    "partition":
+                        partition,
+
+                    "hash":
+                        h,
+
+                    "group_size":
+                        len(files),
+
+                    "redundant_images":
+                        len(files) - 1,
+
+                    "retained_image":
+                        sorted(files)[0],
+
+                    "image":
+                        filename,
                 })
 
     write_csv(
@@ -1009,43 +1586,173 @@ def write_logs(
             "partition",
             "hash",
             "group_size",
+            "redundant_images",
+            "retained_image",
             "image"
         ]
     )
 
-    # --------------------------------------------------------
-    # Cross split overlap log
-    # --------------------------------------------------------
+    # ========================================================
+    # Train-test overlap log
+    # ========================================================
+
+    overlap_rows = []
+
+    for group in overlaps:
+
+        overlap_rows.append({
+
+            "hash":
+                group["hash"],
+
+            "train_images":
+                " || ".join(
+                    group["train_images"]
+                ),
+
+            "test_images":
+                " || ".join(
+                    group["test_images"]
+                ),
+
+            "train_count":
+                group["train_count"],
+
+            "test_count":
+                group["test_count"],
+
+            "pair_count":
+                group["pair_count"],
+        })
 
     write_csv(
         CROSS_SPLIT_LOG,
-        overlaps,
+        overlap_rows,
         [
             "hash",
-            "train_image",
-            "test_image"
+            "train_images",
+            "test_images",
+            "train_count",
+            "test_count",
+            "pair_count"
         ]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Label conflict log
-    # --------------------------------------------------------
+    # ========================================================
 
     write_csv(
         CONFLICT_LOG,
         conflicts,
         [
             "hash",
-            "train_image",
-            "test_image",
+            "train_images",
+            "test_images",
             "train_labels",
-            "test_labels"
+            "test_labels",
+            "train_count",
+            "test_count"
+        ]
+    )
+
+    # ========================================================
+    # Malformed records
+    # ========================================================
+
+    malformed_rows = []
+
+    for partition, audit in [
+        ("train", train_audit),
+        ("test", test_audit)
+    ]:
+
+        for row in audit[
+            "malformed"
+        ]:
+
+            malformed_rows.append({
+
+                "partition":
+                    partition,
+
+                "line_number":
+                    row["line_number"],
+
+                "reason":
+                    row["reason"],
+
+                "content":
+                    row["content"],
+            })
+
+    write_csv(
+        MALFORMED_LOG,
+        malformed_rows,
+        [
+            "partition",
+            "line_number",
+            "reason",
+            "content"
+        ]
+    )
+
+    # ========================================================
+    # Missing records
+    # ========================================================
+
+    missing_rows = []
+
+    for partition, audit in [
+        ("train", train_audit),
+        ("test", test_audit)
+    ]:
+
+        for filename in audit[
+            "missing_images"
+        ]:
+
+            missing_rows.append({
+
+                "partition":
+                    partition,
+
+                "image":
+                    filename,
+
+                "reason":
+                    "label_references_missing_image"
+            })
+
+        for filename in audit[
+            "images_without_labels"
+        ]:
+
+            missing_rows.append({
+
+                "partition":
+                    partition,
+
+                "image":
+                    filename,
+
+                "reason":
+                    "image_has_no_label"
+            })
+
+    write_csv(
+        MISSING_LOG,
+        missing_rows,
+        [
+            "partition",
+            "image",
+            "reason"
         ]
     )
 
 
 # ============================================================
-# Summary
+# Create Summary
 # ============================================================
 
 def create_summary(
@@ -1055,6 +1762,9 @@ def create_summary(
     conflicts,
     removals
 ):
+    """
+    Generate JSON and TXT summaries.
+    """
 
     train_removed = {
         row["image"]
@@ -1068,9 +1778,35 @@ def create_summary(
         if row["partition"] == "test"
     }
 
+    unique_overlap_train_images = {
+        image
+        for group in overlaps
+        for image in group["train_images"]
+    }
+
+    unique_overlap_test_images = {
+        image
+        for group in overlaps
+        for image in group["test_images"]
+    }
+
+    total_pairings = sum(
+        group["pair_count"]
+        for group in overlaps
+    )
+
     summary = {
 
-        "dataset": "HME100K",
+        # ====================================================
+        # Dataset
+        # ====================================================
+
+        "dataset":
+            "HME100K",
+
+        # ====================================================
+        # Original dataset
+        # ====================================================
 
         "original": {
 
@@ -1085,8 +1821,11 @@ def create_summary(
 
             "testing_images":
                 len(test_audit["image_files"]),
-
         },
+
+        # ====================================================
+        # Data quality
+        # ====================================================
 
         "quality_findings": {
 
@@ -1103,50 +1842,118 @@ def create_summary(
                 len(test_audit["missing_images"]),
 
             "training_images_without_labels":
-                len(train_audit[
-                    "images_without_labels"
-                ]),
+                len(
+                    train_audit[
+                        "images_without_labels"
+                    ]
+                ),
 
             "testing_images_without_labels":
-                len(test_audit[
-                    "images_without_labels"
-                ]),
+                len(
+                    test_audit[
+                        "images_without_labels"
+                    ]
+                ),
 
             "training_corrupted_images":
-                len(train_audit[
-                    "corrupted_images"
-                ]),
+                len(
+                    train_audit[
+                        "corrupted_images"
+                    ]
+                ),
 
             "testing_corrupted_images":
-                len(test_audit[
-                    "corrupted_images"
-                ]),
+                len(
+                    test_audit[
+                        "corrupted_images"
+                    ]
+                ),
 
+            "training_duplicate_label_names":
+                len(
+                    train_audit[
+                        "duplicate_label_filenames"
+                    ]
+                ),
+
+            "testing_duplicate_label_names":
+                len(
+                    test_audit[
+                        "duplicate_label_filenames"
+                    ]
+                ),
         },
+
+        # ====================================================
+        # Duplicate analysis
+        # ====================================================
 
         "duplicate_analysis": {
 
             "training_duplicate_groups":
-                len(train_audit[
-                    "duplicate_groups"
-                ]),
+                len(
+                    train_audit[
+                        "duplicate_groups"
+                    ]
+                ),
 
             "testing_duplicate_groups":
-                len(test_audit[
-                    "duplicate_groups"
-                ]),
+                len(
+                    test_audit[
+                        "duplicate_groups"
+                    ]
+                ),
 
+            "training_duplicate_images_involved":
+                train_audit[
+                    "duplicate_images_involved"
+                ],
+
+            "testing_duplicate_images_involved":
+                test_audit[
+                    "duplicate_images_involved"
+                ],
+
+            "training_redundant_duplicate_images":
+                train_audit[
+                    "redundant_duplicate_images"
+                ],
+
+            "testing_redundant_duplicate_images":
+                test_audit[
+                    "redundant_duplicate_images"
+                ],
         },
+
+        # ====================================================
+        # Leakage analysis
+        # ====================================================
 
         "leakage_analysis": {
 
-            "exact_train_test_overlaps":
+            "unique_overlapping_image_hashes":
                 len(overlaps),
 
-            "label_conflicts_in_overlaps":
-                len(conflicts),
+            "unique_training_images_involved":
+                len(
+                    unique_overlap_train_images
+                ),
 
+            "unique_testing_images_involved":
+                len(
+                    unique_overlap_test_images
+                ),
+
+            "total_train_test_overlap_pairings":
+                total_pairings,
+
+            "unique_overlap_groups_with_label_conflicts":
+                len(conflicts),
         },
+
+        # ====================================================
+        # Cleaning
+        # ====================================================
 
         "cleaning": {
 
@@ -1157,32 +1964,57 @@ def create_summary(
                 len(test_removed),
 
             "training_remaining":
-                len(train_audit["records"])
-                - len(train_removed),
+                len(
+                    train_audit["records"]
+                )
+                -
+                len(train_removed),
 
             "testing_remaining":
-                len(test_audit["records"])
-                - len(test_removed),
-
+                len(
+                    test_audit["records"]
+                )
+                -
+                len(test_removed),
         },
+
+        # ====================================================
+        # Output
+        # ====================================================
 
         "output_directory":
             str(CLEANED_DATASET_DIR),
 
+        # ====================================================
+        # Vocabulary policy
+        # ====================================================
+
         "vocabulary_policy":
             "Vocabulary must be rebuilt from cleaned "
             "training labels only.",
+
+        # ====================================================
+        # Expression overlap policy
+        # ====================================================
 
         "expression_overlap_policy":
             "Same mathematical expression in different "
             "handwritten images is not removed solely "
             "because the expression is shared.",
 
+        # ====================================================
+        # Conflict policy
+        # ====================================================
+
+        "label_conflict_policy":
+            "Exact image overlaps with conflicting labels "
+            "must be reviewed before cleaning. They are "
+            "not silently resolved.",
     }
 
-    # --------------------------------------------------------
-    # JSON
-    # --------------------------------------------------------
+    # ========================================================
+    # Save JSON
+    # ========================================================
 
     with open(
         SUMMARY_JSON,
@@ -1197,9 +2029,9 @@ def create_summary(
             ensure_ascii=False
         )
 
-    # --------------------------------------------------------
-    # Human-readable TXT
-    # --------------------------------------------------------
+    # ========================================================
+    # Save TXT
+    # ========================================================
 
     with open(
         SUMMARY_TXT,
@@ -1218,6 +2050,10 @@ def create_summary(
         f.write(
             "=" * 70 + "\n\n"
         )
+
+        # ----------------------------------------------------
+        # Original
+        # ----------------------------------------------------
 
         f.write(
             "ORIGINAL DATASET\n"
@@ -1243,6 +2079,10 @@ def create_summary(
             f"{summary['original']['testing_images']}\n\n"
         )
 
+        # ----------------------------------------------------
+        # Quality
+        # ----------------------------------------------------
+
         f.write(
             "DATA QUALITY\n"
         )
@@ -1264,11 +2104,25 @@ def create_summary(
 
         f.write(
             f"Test corrupted  : "
-            f"{summary['quality_findings']['testing_corrupted_images']}\n\n"
+            f"{summary['quality_findings']['testing_corrupted_images']}\n"
         )
 
         f.write(
-            "DUPLICATES\n"
+            f"Train missing images : "
+            f"{summary['quality_findings']['training_missing_images']}\n"
+        )
+
+        f.write(
+            f"Test missing images : "
+            f"{summary['quality_findings']['testing_missing_images']}\n\n"
+        )
+
+        # ----------------------------------------------------
+        # Duplicates
+        # ----------------------------------------------------
+
+        f.write(
+            "DUPLICATE ANALYSIS\n"
         )
 
         f.write(
@@ -1278,22 +2132,65 @@ def create_summary(
 
         f.write(
             f"Test duplicate groups  : "
-            f"{summary['duplicate_analysis']['testing_duplicate_groups']}\n\n"
+            f"{summary['duplicate_analysis']['testing_duplicate_groups']}\n"
         )
 
         f.write(
-            "LEAKAGE\n"
+            f"Train duplicate images involved : "
+            f"{summary['duplicate_analysis']['training_duplicate_images_involved']}\n"
         )
 
         f.write(
-            f"Exact train-test overlaps : "
-            f"{summary['leakage_analysis']['exact_train_test_overlaps']}\n"
+            f"Test duplicate images involved : "
+            f"{summary['duplicate_analysis']['testing_duplicate_images_involved']}\n"
         )
 
         f.write(
-            f"Label conflicts           : "
-            f"{summary['leakage_analysis']['label_conflicts_in_overlaps']}\n\n"
+            f"Train redundant duplicates : "
+            f"{summary['duplicate_analysis']['training_redundant_duplicate_images']}\n"
         )
+
+        f.write(
+            f"Test redundant duplicates : "
+            f"{summary['duplicate_analysis']['testing_redundant_duplicate_images']}\n\n"
+        )
+
+        # ----------------------------------------------------
+        # Leakage
+        # ----------------------------------------------------
+
+        f.write(
+            "TRAIN-TEST LEAKAGE ANALYSIS\n"
+        )
+
+        f.write(
+            f"Unique overlapping hashes : "
+            f"{summary['leakage_analysis']['unique_overlapping_image_hashes']}\n"
+        )
+
+        f.write(
+            f"Unique train images involved : "
+            f"{summary['leakage_analysis']['unique_training_images_involved']}\n"
+        )
+
+        f.write(
+            f"Unique test images involved : "
+            f"{summary['leakage_analysis']['unique_testing_images_involved']}\n"
+        )
+
+        f.write(
+            f"Total overlap pairings : "
+            f"{summary['leakage_analysis']['total_train_test_overlap_pairings']}\n"
+        )
+
+        f.write(
+            f"Overlap groups with label conflicts : "
+            f"{summary['leakage_analysis']['unique_overlap_groups_with_label_conflicts']}\n\n"
+        )
+
+        # ----------------------------------------------------
+        # Cleaning
+        # ----------------------------------------------------
 
         f.write(
             "CLEANING\n"
@@ -1319,8 +2216,21 @@ def create_summary(
             f"{summary['cleaning']['testing_remaining']}\n\n"
         )
 
+        # ----------------------------------------------------
+        # Policies
+        # ----------------------------------------------------
+
         f.write(
-            "IMPORTANT POLICY\n"
+            "POLICIES\n"
+        )
+
+        f.write(
+            "Original HME100K is never modified.\n"
+        )
+
+        f.write(
+            "Vocabulary is rebuilt from cleaned training "
+            "labels only.\n"
         )
 
         f.write(
@@ -1330,8 +2240,8 @@ def create_summary(
         )
 
         f.write(
-            "Vocabulary must be rebuilt from cleaned "
-            "training labels only.\n"
+            "Exact image-overlap label conflicts require "
+            "manual review before cleaning.\n"
         )
 
     print(
@@ -1347,8 +2257,13 @@ def create_summary(
 def main():
 
     print("\n")
+
     print("=" * 70)
-    print("HME100K DATASET CLEANING PIPELINE")
+
+    print(
+        "HME100K DATASET CLEANING PIPELINE"
+    )
+
     print("=" * 70)
 
     print(
@@ -1361,9 +2276,9 @@ def main():
         f"{CLEANED_DATASET_DIR}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Verify original dataset
-    # --------------------------------------------------------
+    # ========================================================
 
     if not DATASET_DIR.exists():
 
@@ -1400,9 +2315,9 @@ def main():
             f"{TEST_LABEL_FILE}"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Audit train
-    # --------------------------------------------------------
+    # ========================================================
 
     train_audit = audit_partition(
         "train",
@@ -1410,9 +2325,9 @@ def main():
         TRAIN_LABEL_FILE
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Audit test
-    # --------------------------------------------------------
+    # ========================================================
 
     test_audit = audit_partition(
         "test",
@@ -1420,18 +2335,18 @@ def main():
         TEST_LABEL_FILE
     )
 
-    # --------------------------------------------------------
-    # Exact train-test overlap
-    # --------------------------------------------------------
+    # ========================================================
+    # Find exact train-test image overlaps
+    # ========================================================
 
     overlaps = find_cross_split_overlaps(
         train_audit,
         test_audit
     )
 
-    # --------------------------------------------------------
-    # Check whether overlapping images have conflicting labels
-    # --------------------------------------------------------
+    # ========================================================
+    # Analyse labels
+    # ========================================================
 
     conflicts = analyse_overlap_labels(
         overlaps,
@@ -1439,14 +2354,9 @@ def main():
         test_audit["records"]
     )
 
-    print(
-        f"Overlaps with label conflicts: "
-        f"{len(conflicts)}"
-    )
-
-    # --------------------------------------------------------
-    # Build cleaning plan
-    # --------------------------------------------------------
+    # ========================================================
+    # Build preliminary removal plan
+    # ========================================================
 
     removals = build_removal_plan(
         train_audit,
@@ -1454,18 +2364,28 @@ def main():
         overlaps
     )
 
+    # ========================================================
+    # Print cleaning plan
+    # ========================================================
+
     print("\n" + "=" * 70)
-    print("CLEANING PLAN")
+
+    print(
+        "PRELIMINARY CLEANING PLAN"
+    )
+
     print("=" * 70)
 
     train_removals = [
-        x for x in removals
-        if x["partition"] == "train"
+        row
+        for row in removals
+        if row["partition"] == "train"
     ]
 
     test_removals = [
-        x for x in removals
-        if x["partition"] == "test"
+        row
+        for row in removals
+        if row["partition"] == "test"
     ]
 
     print(
@@ -1482,9 +2402,9 @@ def main():
         "\nOriginal dataset WILL NOT be modified."
     )
 
-    # --------------------------------------------------------
-    # Write preliminary logs
-    # --------------------------------------------------------
+    # ========================================================
+    # Write audit logs BEFORE cleaning
+    # ========================================================
 
     write_logs(
         train_audit,
@@ -1494,9 +2414,55 @@ def main():
         removals
     )
 
-    # --------------------------------------------------------
-    # Ask before creating cleaned dataset
-    # --------------------------------------------------------
+    # ========================================================
+    # SAFETY CHECK: LABEL CONFLICTS
+    # ========================================================
+
+    if len(conflicts) > 0:
+
+        print("\n" + "=" * 70)
+
+        print(
+            "CLEANING BLOCKED"
+        )
+
+        print("=" * 70)
+
+        print(
+            f"\nThere are "
+            f"{len(conflicts)} "
+            f"unique exact-image overlap groups "
+            f"with label conflicts."
+        )
+
+        print(
+            "\nThese cases must be reviewed before "
+            "the cleaned dataset is created."
+        )
+
+        print(
+            f"\nConflict log:"
+            f"\n{CONFLICT_LOG}"
+        )
+
+        print(
+            f"\nFull overlap log:"
+            f"\n{CROSS_SPLIT_LOG}"
+        )
+
+        print(
+            "\nThe original dataset has NOT been modified."
+        )
+
+        print(
+            "\nNo cleaned dataset was created."
+        )
+
+        return
+
+    # ========================================================
+    # No conflicts → ask permission
+    # ========================================================
 
     print("\n" + "=" * 70)
 
@@ -1511,15 +2477,15 @@ def main():
         )
 
         print(
-            f"Audit logs have still been saved to:\n"
+            f"\nAudit logs have been saved to:\n"
             f"{AUDIT_DIR}"
         )
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # Create cleaned dataset
-    # --------------------------------------------------------
+    # ========================================================
 
     success = create_cleaned_dataset(
         train_audit,
@@ -1528,11 +2494,12 @@ def main():
     )
 
     if not success:
+
         return
 
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
+    # ========================================================
+    # Create summary
+    # ========================================================
 
     create_summary(
         train_audit,
@@ -1542,26 +2509,34 @@ def main():
         removals
     )
 
+    # ========================================================
+    # Final message
+    # ========================================================
+
     print("\n" + "=" * 70)
-    print("CLEANING COMPLETED")
+
+    print(
+        "CLEANING COMPLETED"
+    )
+
     print("=" * 70)
 
     print(
-        f"\nCleaned dataset:\n"
-        f"{CLEANED_DATASET_DIR}"
+        f"\nCleaned dataset:"
+        f"\n{CLEANED_DATASET_DIR}"
     )
 
     print(
-        f"\nAudit directory:\n"
-        f"{AUDIT_DIR}"
+        f"\nAudit directory:"
+        f"\n{AUDIT_DIR}"
     )
 
     print(
-        "\nIMPORTANT:"
+        "\nIMPORTANT NEXT STEP:"
     )
 
     print(
-        "Do NOT run training yet."
+        "Do NOT start model training yet."
     )
 
     print(
@@ -1574,5 +2549,10 @@ def main():
     )
 
 
+# ============================================================
+# Entry Point
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
