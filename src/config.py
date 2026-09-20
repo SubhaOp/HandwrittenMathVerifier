@@ -37,6 +37,14 @@ if IS_COLAB:
     PROJECT_ROOT = Path("/content/HandwrittenMathVerifier")
 
     DATASET_CANDIDATES = [
+        # CHANGED: cleaned dataset checked FIRST. clean_dataset.py
+        # writes to a separate HME100K_CLEANED folder and never
+        # touches the original -- this list previously had no entry
+        # for it at all, so every script would keep silently using
+        # the original, uncleaned data regardless of cleaning having
+        # been run.
+        Path("/content/HME100K_CLEANED"),
+        Path("/content/drive/MyDrive/HandwrittenMathVerifier/HME100K_CLEANED"),
         Path("/content/HME100K"),
         PROJECT_ROOT / "HME100K",
         Path("/content/drive/MyDrive/HandwrittenMathVerifier/HME100K"),
@@ -169,7 +177,10 @@ if torch.cuda.is_available():
     print("GPU          :", torch.cuda.get_device_name(0))
 
 print("Project      :", PROJECT_ROOT)
-print("Dataset      :", DATASET_DIR)
+print(
+    "Dataset      :", DATASET_DIR,
+    "[CLEANED]" if "CLEANED" in str(DATASET_DIR) else "[ORIGINAL]"
+)
 print("Train images :", TRAIN_IMAGE_DIR)
 print("Train labels :", TRAIN_LABEL_FILE)
 print("Models       :", MODEL_DIR)
