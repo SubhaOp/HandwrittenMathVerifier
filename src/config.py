@@ -36,32 +36,29 @@ IS_KAGGLE = (
 if IS_COLAB:
     PROJECT_ROOT = Path("/content/HandwrittenMathVerifier")
 
-    DATASET_CANDIDATES = [
-        # CHANGED: cleaned dataset checked FIRST. clean_dataset.py
-        # writes to a separate HME100K_CLEANED folder and never
-        # touches the original -- this list previously had no entry
-        # for it at all, so every script would keep silently using
-        # the original, uncleaned data regardless of cleaning having
-        # been run.
-        Path("/content/HME100K_CLEANED"),
-        Path("/content/drive/MyDrive/HandwrittenMathVerifier/HME100K_CLEANED"),
-        Path("/content/HME100K"),
-        PROJECT_ROOT / "HME100K",
-        Path("/content/drive/MyDrive/HandwrittenMathVerifier/HME100K"),
-        Path("/content/drive/MyDrive/HME100K"),
-    ]
+    # ======================================================
+    # CLEANED HME100K DATASET
+    # ======================================================
+    # The cleaned dataset is extracted in Colab at:
+    # /content/HME100K_CLEANED
+    #
+    # IMPORTANT:
+    # Force Colab to use the cleaned dataset. Do NOT fall back
+    # silently to the original /content/HME100K dataset.
+    CLEANED_DATASET = Path("/content/HME100K_CLEANED")
 
-    DATASET_DIR = None
-    for candidate in DATASET_CANDIDATES:
-        if (
-            (candidate / "train" / "train_images").is_dir()
-            and (candidate / "train" / "train_labels.txt").is_file()
-        ):
-            DATASET_DIR = candidate
-            break
+    if (
+        not (CLEANED_DATASET / "train" / "train_images").is_dir()
+        or not (CLEANED_DATASET / "train" / "train_labels.txt").is_file()
+    ):
+        raise FileNotFoundError(
+            "Cleaned HME100K dataset was not found at "
+            f"{CLEANED_DATASET}. Expected: "
+            f"{CLEANED_DATASET / 'train' / 'train_images'} and "
+            f"{CLEANED_DATASET / 'train' / 'train_labels.txt'}"
+        )
 
-    if DATASET_DIR is None:
-        DATASET_DIR = Path("/content/HME100K")
+    DATASET_DIR = CLEANED_DATASET
 
     DRIVE_ROOT = Path(
         "/content/drive/MyDrive/HandwrittenMathVerifier"
