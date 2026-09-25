@@ -15,7 +15,7 @@ from src.model import MathRecognizer
 # Final 16-epoch model trained on the full valid HME100K training set.
 FINAL_MODEL_PATH = Path(
     "/content/drive/MyDrive/HandwrittenMathVerifier/"
-    "final_training_16_epoch/math_recognizer_v3_final_epoch16.pth"
+    "final_training_12_epoch/math_recognizer_v3_final_epoch12.pth"
 )
 
 DEFAULT_BEAM_WIDTH = 10
@@ -1183,7 +1183,7 @@ from src.model import MathRecognizer
 # Final 16-epoch model trained on the full valid HME100K training set.
 FINAL_MODEL_PATH = Path(
     "/content/drive/MyDrive/HandwrittenMathVerifier/"
-    "final_training_16_epoch/math_recognizer_v3_final_epoch16.pth"
+    "final_training_12_epoch/math_recognizer_v3_final_epoch12.pth"
 )
 
 DEFAULT_BEAM_WIDTH = 10
