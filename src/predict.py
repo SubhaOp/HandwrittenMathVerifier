@@ -12,10 +12,10 @@ from src.model import MathRecognizer
 # V3 Configuration
 # ======================================================
 
-# Final 16-epoch model trained on the full valid HME100K training set.
+# Final 12-epoch model trained on the full cleaned HME100K training set.
 FINAL_MODEL_PATH = Path(
     "/content/drive/MyDrive/HandwrittenMathVerifier/"
-    "final_training_12_epoch/math_recognizer_v3_final_epoch12.pth"
+    "saved_models/best_model_v3_cleaned.pth"
 )
 
 DEFAULT_BEAM_WIDTH = 10
@@ -59,7 +59,7 @@ model = MathRecognizer(
 )
 
 
-# IMPORTANT: use the final 16-epoch model, not the older saved_models model.
+# IMPORTANT: use the final 12-epoch cleaned-dataset model.
 model_path = FINAL_MODEL_PATH
 
 
@@ -70,7 +70,7 @@ if not model_path.exists():
         f"\nV3 model not found:\n"
         f"{model_path}\n\n"
 
-        f"Make sure the final 16-epoch model exists at:\n"
+        f"Make sure the final 12-epoch cleaned-dataset model exists at:\n"
         f"{FINAL_MODEL_PATH}"
     )
 
@@ -1180,10 +1180,10 @@ from src.model import MathRecognizer
 # V3 Configuration
 # ======================================================
 
-# Final 16-epoch model trained on the full valid HME100K training set.
+# Final 12-epoch model trained on the full cleaned HME100K training set.
 FINAL_MODEL_PATH = Path(
     "/content/drive/MyDrive/HandwrittenMathVerifier/"
-    "final_training_12_epoch/math_recognizer_v3_final_epoch12.pth"
+    "saved_models/best_model_v3_cleaned.pth"
 )
 
 DEFAULT_BEAM_WIDTH = 10
@@ -1227,7 +1227,7 @@ model = MathRecognizer(
 )
 
 
-# IMPORTANT: use the final 16-epoch model, not the older saved_models model.
+# IMPORTANT: use the final 12-epoch cleaned-dataset model.
 model_path = FINAL_MODEL_PATH
 
 
@@ -1238,7 +1238,7 @@ if not model_path.exists():
         f"\nV3 model not found:\n"
         f"{model_path}\n\n"
 
-        f"Make sure the final 16-epoch model exists at:\n"
+        f"Make sure the final 12-epoch cleaned-dataset model exists at:\n"
         f"{FINAL_MODEL_PATH}"
     )
 
